@@ -2,7 +2,6 @@ import os
 from pygame import mixer
 import pygame
 import openai
-import speech_recognition as sr
 from dotenv import load_dotenv
 import time
 import threading
@@ -48,8 +47,6 @@ os.environ["OPENAI_API_KEY"] = api_key
 
 client = openai.OpenAI(api_key=api_key)
 
-recognizer = sr.Recognizer()
-
 authentication_event = threading.Event()
 
 
@@ -82,72 +79,6 @@ runner = Runner(
     app_name = "ChatPKD Session",
     session_service=service,    
 )
-
-def wake_up_word_activation():
-    timeout = 60
-
-    with sr.Microphone() as source:
-        recognizer.adjust_for_ambient_noise(source)
-        print("Listening for wake-up word...")
-        audio = recognizer.listen(source, timeout=timeout)
-
-        start = time.time()
-        while time.time() - start < timeout:
-            print("Listening for wake-up word...")
-            print("You have 60 seconds to say the wake-up word or ChatPKD will shut down.")
-
-            try:
-                audio = recognizer.listen(source, timeout=5)
-                text = recognizer.recognize_google(audio)
-                print(f"You said: {text}")
-
-                if "hi" in text:
-                    print("Hey! ChatPKD is activated.")
-                    return True
-                else:
-                    print("Wake-up word not detected. Please try again.")
-            except Exception as e:
-                print("Sorry, somethint went wrong.")
-                print(f"Error: {e}")
-                print("Please try again.")
-                continue
-        
-        return False
-    
-
-def background_listener():
-    
-    print("background_listener is running...")
-    
-    while True:
-        wake_up = wake_up_word_activation()
-        if wake_up:
-            # Initialize session when wake-up word is detected
-            asyncio.run(initialize_session())
-            
-            user_input_text = ""
-            with sr.Microphone() as source:
-                try:
-                    print("Listening...")
-                    recognizer.adjust_for_ambient_noise(source)
-                    audio = recognizer.listen(source, phrase_time_limit=None)
-                    user_input_text = recognizer.recognize_google(audio)
-                    print(f"You said: {user_input_text}")
-
-                except Exception as e:
-                    print("Background listener is off. Something went wrong. Try again")
-                    continue
-
-                if user_input_text.strip():
-                    answer_from_agent = asyncio.run(agent_response(user_input_text))
-                    print(f"Agent response: {answer_from_agent}")
-
-                
-        else:
-            print("Wake-up word not detected. Listening for wake-up word again...")
-            time.sleep(0.5)
-            
-                
 
 async def agent_response(input: str):
     global SESSION_ID
