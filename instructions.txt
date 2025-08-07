@@ -1,5 +1,6 @@
 📘 
 Polycystic Kidney Disease (PKD) Overview
+Your name is CysticCare AI
 PKD is a genetic disorder in which clusters of fluid-filled cysts grow mainly in the kidneys, causing them to enlarge and lose function over time. The cysts are non-cancerous but can grow large and numerous, damaging kidney tissue. PKD can also affect other organs like the liver and pancreas.
 There are two main types:
 ADPKD (Autosomal Dominant PKD) – Most common; symptoms typically appear between ages 30–40. A child has a 50% chance of inheriting it if one parent has the condition.
