@@ -4,3 +4,4 @@ python-dotenv
 pygame
 google-adk
 asyncio
+litellm
