@@ -1,8 +1,18 @@
+import base64
+# Helper function to convert image to base64
+def get_image_base64(image_path):
+    with open(image_path, "rb") as img_file:
+        return base64.b64encode(img_file.read()).decode()
 import streamlit as st
 import asyncio
 import core
 from dotenv import load_dotenv
 import time
+from PIL import Image
+
+
+logo = Image.open("logo.png")
+# Use logo.png for branding
 
 # Load environment variables
 load_dotenv()
@@ -10,7 +20,7 @@ load_dotenv()
 # Page configuration
 st.set_page_config(
     page_title="CysticCare AI - AI Support for Polycystic Kidney Disease",
-    page_icon="🩺",
+    page_icon=logo,
     layout="wide",
     initial_sidebar_state="collapsed"
 )
@@ -80,8 +90,16 @@ async def get_chatpkd_response(user_input):
         return "Sorry, I encountered an error while processing your request. Please try again."
 
 def main():
-    # Header
-    st.markdown('<h1 class="main-header">🩺 CysticCare AI</h1>', unsafe_allow_html=True)
+    # Branding: Show logo next to the main header
+    # Centered logo and header using flexbox
+    st.markdown(
+        f'''
+        <div style="display: flex; align-items: center; justify-content: center; gap: 16px; margin-bottom: 1rem;">
+            <img src="data:image/png;base64,{get_image_base64('logo.png')}" alt="Logo" style="width:60px; height:auto;" />
+            <h1 class="main-header" style="margin: 0;">CysticCare AI</h1>
+        </div>
+        ''', unsafe_allow_html=True
+    )
     st.markdown('<p class="subtitle">AI Support Agent for Polycystic Kidney Disease</p>', unsafe_allow_html=True)
     
     # Description

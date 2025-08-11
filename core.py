@@ -82,6 +82,8 @@ runner = Runner(
 
 async def agent_response(input: str):
     global SESSION_ID
+
+    input = input + "Use plain, everyday language that anyone can understand. Avoid technical terms or specialized vocabulary. Keep responses concise and under 50 words. Aim for clarity, simplicity, and easy readability for a general audience. If you cannot answer from the context, reply: “Sorry unable to provide the answer. The question that you asked is outside my knowledge base”"
     
     answer = "Sorry, I had trouble understanding you. Please try again."
     agent_name = runner.agent.name
