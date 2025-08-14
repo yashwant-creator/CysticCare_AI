@@ -5,3 +5,7 @@ pygame
 google-adk
 asyncio
 litellm
+sentence_transformers
+faiss-cpu
+numpy
+pdfplumber

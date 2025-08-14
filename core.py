@@ -13,6 +13,13 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.events import Event
 from google.genai import types
+import faiss
+import numpy as np
+
+from sentence_transformers import SentenceTransformer
+# sentence_transformer class is apparently built on top of HugginsFace Transformer
+
+import pdfplumber
 
 
 """
@@ -34,9 +41,40 @@ Future developers note:
 """
 
 
+
 load_dotenv()
 
 api_key = os.getenv("OPEN_AI_API_KEY")
+
+
+folder = 'papers'
+chunks =[]
+
+
+# the below for loop is for the python script to read the pdf's in the papers folder and break it into chunks
+for filename in os.listdir(folder):
+    if filename.endswith('.pdf'):
+        with pdfplumber.open(os.path.join(folder,filename)) as pdf:
+            text =''
+
+            for page in pdf.pages:
+                text+=page.extract_text() or ""
+            for i, para in enumerate(text.split("/n/n")):
+                chunks.append({"text":para, "source": filename, "chunk_index": i })
+
+
+
+# below 3 lines of code basically converts all the text pieces from the papers folder and converts them into vector
+model = SentenceTransformer('all-MiniLM-L6-v2')
+texts= [chunk["text"] for chunk in chunks]
+embeddings = model.encode(texts)
+
+
+#The below lines of code basically stores all the embeddings created in the last couple of lines and stores them in a Vector Database
+dim = embeddings.shape[1]
+index = faiss.IndexFlatL2(dim)
+index.add(np.array(embeddings))
+
 
 if not api_key:
     print("Error: OPEN_AI_API_KEY not found in .env file.")
@@ -53,7 +91,6 @@ authentication_event = threading.Event()
 main_agent = LlmAgent(
     name='ChatPKD',
     model=LiteLlm(model="gpt-4o-mini"),
-    instruction=open("instructions.txt").read(),
     description="ChatPKD is a AI support agent that can aid patients with Polycystic Kidney Disease, a genetic disorder characterized by the growth of numerous fluid-filled cysts in the kidneys, potentially leading to kidney failure" 
 )
 
@@ -83,8 +120,19 @@ runner = Runner(
 async def agent_response(input: str):
     global SESSION_ID
 
-    input = input + "Use plain, everyday language that anyone can understand. Avoid technical terms or specialized vocabulary. Keep responses concise and under 50 words. Aim for clarity, simplicity, and easy readability for a general audience. If you cannot answer from the context, reply: “Sorry unable to provide the answer. The question that you asked is outside my knowledge base”"
+    input = input + "Use plain, everyday language that anyone can understand.Avoid technical terms or specialized vocabulary. Keep responses concise under 150 words unless the user wants you to explain the question in detail. Aim for clarity, simplicity, and easy readability for a general audience. If you cannot answer from the context, reply: “Sorry unable to provide the answer. The question that you asked is outside my knowledge base. I am a chatbot designed only to answer questions about Polycystic Kidney Disease”"
     
+    query_emb = model.encode([input])
+
+    # D is the distance between the closest vectors
+    # I is the indecies of the 1 closest vector
+    D,I = index.search(np.array(query_emb) , k =1)
+
+    context = "\n\n".join([chunks[i]['text'] for i in I[0]])
+
+    full_input__for_LLM = f"Context:/n{context}\n\n Question: {input}"
+
+
     answer = "Sorry, I had trouble understanding you. Please try again."
     agent_name = runner.agent.name
     final_agent_output = None
@@ -96,7 +144,7 @@ async def agent_response(input: str):
     
     try:
         #the below line of code is used to format the input text into a content object
-        content = types.Content(role = "user", parts=[types.Part(text=input)])
+        content = types.Content(role = "user", parts=[types.Part(text=full_input__for_LLM)])
 
         async for event in runner.run_async(
             user_id="user_main", session_id=SESSION_ID, new_message=content
