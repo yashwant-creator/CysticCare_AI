@@ -1,7 +1,7 @@
 import os
 from pygame import mixer
 import pygame
-import openai
+
 from dotenv import load_dotenv
 import time
 import threading
@@ -13,6 +13,7 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.events import Event
 from google.genai import types
+
 import faiss
 import numpy as np
 
@@ -21,6 +22,7 @@ from sentence_transformers import SentenceTransformer
 
 import pdfplumber
 
+import openai
 
 """
 Future developers note:
@@ -41,7 +43,6 @@ Future developers note:
 """
 
 
-
 load_dotenv()
 
 api_key = os.getenv("OPEN_AI_API_KEY")
@@ -49,7 +50,17 @@ api_key = os.getenv("OPEN_AI_API_KEY")
 
 folder = 'papers'
 chunks =[]
+import re
 
+#Code to chunk up the code(break it into multiple piecies so that Litellm doesnt overload with text)
+def chunk_up_context(text, chunk_length = 400):
+    words = re.findall(r'\S+', text) 
+    chunks = []
+    for i in range(0, len(words), chunk_length):
+        chunk = ' '.join(words[i:i + chunk_length])
+        chunks.append(chunk)
+    
+    return chunks
 
 # the below for loop is for the python script to read the pdf's in the papers folder and break it into chunks
 for filename in os.listdir(folder):
@@ -59,7 +70,8 @@ for filename in os.listdir(folder):
 
             for page in pdf.pages:
                 text+=page.extract_text() or ""
-            for i, para in enumerate(text.split("/n/n")):
+            chunked_context = chunk_up_context(text)
+            for i, para in enumerate(chunked_context):
                 chunks.append({"text":para, "source": filename, "chunk_index": i })
 
 
