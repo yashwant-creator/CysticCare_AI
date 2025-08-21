@@ -132,7 +132,7 @@ runner = Runner(
 async def agent_response(input: str):
     global SESSION_ID
 
-    input = input + "Use plain, everyday language that anyone can understand.Avoid technical terms or specialized vocabulary. Keep responses concise under 150 words unless the user wants you to explain the question in detail. Aim for clarity, simplicity, and easy readability for a general audience. If you cannot answer from the context, reply: “Sorry unable to provide the answer. The question that you asked is outside my knowledge base. I am a chatbot designed only to answer questions about Polycystic Kidney Disease”"
+    input = input + "Use plain, everyday language that anyone can understand. Avoid technical terms or specialized vocabulary. Keep responses concise under 250 words unless the user wants you to explain the question in detail. Aim for clarity, simplicity, and easy readability for a general audience. If you cannot answer from the context, reply: “Sorry unable to provide the answer. The question that you asked is outside my knowledge base. I am a chatbot designed only to answer questions about Polycystic Kidney Disease. ”"
     
     query_emb = model.encode([input])
 
