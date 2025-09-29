@@ -170,18 +170,33 @@ class _ChatScreenState extends State<ChatScreen> {
       appBar: AppBar(
         title: Row(
           children: [
-            // Placeholder for logo - you can add your actual logo here
+            // CysticCare AI Logo
             Container(
               width: 40,
               height: 40,
               decoration: BoxDecoration(
-                color: Theme.of(context).primaryColor,
                 borderRadius: BorderRadius.circular(20),
               ),
-              child: const Icon(
-                Icons.medical_services,
-                color: Colors.white,
-                size: 24,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(20),
+                child: Image.asset(
+                  'assets/images/logo.png',
+                  fit: BoxFit.cover,
+                  errorBuilder: (context, error, stackTrace) {
+                    // Fallback to icon if logo fails to load
+                    return Container(
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).primaryColor,
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: const Icon(
+                        Icons.medical_services,
+                        color: Colors.white,
+                        size: 24,
+                      ),
+                    );
+                  },
+                ),
               ),
             ),
             const SizedBox(width: 12),
@@ -314,8 +329,24 @@ class _ChatScreenState extends State<ChatScreen> {
         children: [
           if (!message.isUser) ...[
             CircleAvatar(
-              backgroundColor: const Color(0xFF2E86AB),
-              child: const Icon(Icons.smart_toy, color: Colors.white, size: 20),
+              radius: 20,
+              backgroundColor: Colors.transparent,
+              child: ClipOval(
+                child: Image.asset(
+                  'assets/images/logo.png',
+                  width: 40,
+                  height: 40,
+                  fit: BoxFit.cover,
+                  errorBuilder: (context, error, stackTrace) {
+                    // Fallback to icon with blue background if logo fails to load
+                    return CircleAvatar(
+                      backgroundColor: const Color(0xFF2E86AB),
+                      radius: 20,
+                      child: const Icon(Icons.smart_toy, color: Colors.white, size: 20),
+                    );
+                  },
+                ),
+              ),
             ),
             const SizedBox(width: 8),
           ],
@@ -353,8 +384,24 @@ class _ChatScreenState extends State<ChatScreen> {
       child: Row(
         children: [
           CircleAvatar(
-            backgroundColor: const Color(0xFF2E86AB),
-            child: const Icon(Icons.smart_toy, color: Colors.white, size: 20),
+            radius: 20,
+            backgroundColor: Colors.transparent,
+            child: ClipOval(
+              child: Image.asset(
+                'assets/images/logo.png',
+                width: 40,
+                height: 40,
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) {
+                  // Fallback to icon with blue background if logo fails to load
+                  return CircleAvatar(
+                    backgroundColor: const Color(0xFF2E86AB),
+                    radius: 20,
+                    child: const Icon(Icons.smart_toy, color: Colors.white, size: 20),
+                  );
+                },
+              ),
+            ),
           ),
           const SizedBox(width: 8),
           Container(
@@ -428,20 +475,37 @@ class _ChatScreenState extends State<ChatScreen> {
       child: ListView(
         padding: EdgeInsets.zero,
         children: [
-          const DrawerHeader(
-            decoration: BoxDecoration(
+          DrawerHeader(
+            decoration: const BoxDecoration(
               color: Color(0xFF2E86AB),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Icon(
-                  Icons.medical_services,
-                  color: Colors.white,
-                  size: 48,
+                Container(
+                  width: 48,
+                  height: 48,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: Image.asset(
+                      'assets/images/logo.png',
+                      fit: BoxFit.cover,
+                      errorBuilder: (context, error, stackTrace) {
+                        // Fallback to icon if logo fails to load
+                        return const Icon(
+                          Icons.medical_services,
+                          color: Colors.white,
+                          size: 48,
+                        );
+                      },
+                    ),
+                  ),
                 ),
-                SizedBox(height: 16),
-                Text(
+                const SizedBox(height: 16),
+                const Text(
                   'Options',
                   style: TextStyle(
                     color: Colors.white,
