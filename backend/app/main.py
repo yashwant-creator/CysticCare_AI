@@ -208,8 +208,6 @@ async def agent_response(input: str):
     # Include source title and author information in the response
     return answer, source_titles, source_authors
 
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""

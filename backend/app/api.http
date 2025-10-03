@@ -1,0 +1,29 @@
+### CysticCare AI Backend – REST Client requests
+###
+### How to use:
+### - Install the VS Code extension "REST Client" (humao.rest-client)
+### - Click the "Send Request" links above each request
+### - The Initialize request saves {{session_id}} for the Chat request
+
+@base = http://localhost:8000
+
+### Root
+GET {{base}}/
+
+### Health
+GET {{base}}/health
+
+### Initialize (creates a new session)
+# @name init
+POST {{base}}/initialize
+
+> {% client.global.set("session_id", response.body.session_id); %}
+
+### Chat (uses the saved {{session_id}})
+POST {{base}}/chat
+Content-Type: application/json
+
+{
+  "message": "What is Polycystic Kidney Disease?",
+  "session_id": "{{session_id}}"
+}
