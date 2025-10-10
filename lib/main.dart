@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'services/backend_api.dart';
+import 'utils/close_app.dart';
 
 void main() {
   runApp(const CysticCareApp());
@@ -55,6 +56,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _isLoading = false;
   String? _sessionId;
   String? _error;
+  bool _disclaimerAccepted = false;
 
   static const List<String> quickQuestions = [
     "What is Polycystic Kidney Disease?",
@@ -68,7 +70,51 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
-    _initializeSession();
+    // Show disclaimer as soon as the first frame is rendered
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _showDisclaimerIfNeeded();
+    });
+  }
+
+  Future<void> _showDisclaimerIfNeeded() async {
+    if (_disclaimerAccepted) return;
+
+    final accepted = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('Disclaimer'),
+          content: const SingleChildScrollView(
+            child: Text(
+              'The information contained in this website is not intended to serve as a replacement for professional medical advice. Any use of the information in this website is at the reader\'s discretion. The author and publisher specifically disclaim any and all liability arising directly or indirectly from the use or application of any information contained in this website. A health care professional should be consulted regarding your specific situation.',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(ctx).pop(false);
+              },
+              child: const Text('Decline'),
+            ),
+            FilledButton(
+              onPressed: () {
+                Navigator.of(ctx).pop(true);
+              },
+              child: const Text('Accept'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (accepted == true) {
+      setState(() => _disclaimerAccepted = true);
+      _initializeSession();
+    } else {
+      // Close the website/app
+      closeApp();
+    }
   }
 
   Future<void> _initializeSession() async {
@@ -264,6 +310,13 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
           _buildAboutSection(),
+          if (!_disclaimerAccepted)
+            const Expanded(
+              child: Center(
+                child: Text('Please accept the disclaimer to continue.'),
+              ),
+            )
+          else
           if (!_isSessionInitialized && _isLoading)
             const Expanded(
               child: Center(
