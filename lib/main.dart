@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'services/backend_api.dart';
 
 void main() {
   runApp(const CysticCareApp());
@@ -49,8 +50,11 @@ class _ChatScreenState extends State<ChatScreen> {
   final List<ChatMessage> _messages = [];
   final TextEditingController _textController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+  final BackendApi _api = BackendApi();
   bool _isSessionInitialized = false;
   bool _isLoading = false;
+  String? _sessionId;
+  String? _error;
 
   static const List<String> quickQuestions = [
     "What is Polycystic Kidney Disease?",
@@ -58,7 +62,7 @@ class _ChatScreenState extends State<ChatScreen> {
     "How is PKD diagnosed?",
     "What treatment options are available?",
     "How can I manage PKD symptoms?",
-    "What lifestyle changes can help with PKD?"
+    "What lifestyle changes can help with PKD?",
   ];
 
   @override
@@ -70,30 +74,42 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _initializeSession() async {
     setState(() {
       _isLoading = true;
+      _error = null;
     });
 
-    // Simulate session initialization
-    await Future.delayed(const Duration(seconds: 2));
-    
-    setState(() {
-      _isSessionInitialized = true;
-      _isLoading = false;
-    });
+    try {
+      // Optional health check
+      await _api.health();
+      final id = await _api.initializeSession();
+      setState(() {
+        _sessionId = id;
+        _isSessionInitialized = true;
+        _isLoading = false;
+      });
 
-    // Add welcome message
-    _addMessage(
-      "Welcome to CysticCare AI! I'm here to help you with questions about Polycystic Kidney Disease. How can I assist you today?",
-      isUser: false,
-    );
+      // Add welcome message
+      _addMessage(
+        "Welcome to CysticCare AI! I'm connected to the knowledge base on PKD and ready to help. What would you like to know?",
+        isUser: false,
+      );
+    } catch (e) {
+      setState(() {
+        _isLoading = false;
+        _error =
+            'Failed to initialize session. Please ensure the backend is running. Error: $e';
+      });
+    }
   }
 
   void _addMessage(String content, {required bool isUser}) {
     setState(() {
-      _messages.add(ChatMessage(
-        content: content,
-        isUser: isUser,
-        timestamp: DateTime.now(),
-      ));
+      _messages.add(
+        ChatMessage(
+          content: content,
+          isUser: isUser,
+          timestamp: DateTime.now(),
+        ),
+      );
     });
     _scrollToBottom();
   }
@@ -112,39 +128,41 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _sendMessage(String text) async {
     if (text.trim().isEmpty) return;
+    if (!_isSessionInitialized || _sessionId == null) {
+      setState(() => _error = 'Session is not initialized yet.');
+      return;
+    }
 
     _addMessage(text, isUser: true);
     _textController.clear();
 
     setState(() {
       _isLoading = true;
+      _error = null;
     });
 
-    // Simulate AI response delay
-    await Future.delayed(const Duration(seconds: 2));
-    
-    // Simulate AI response (placeholder - you would integrate with your actual AI service here)
-    String response = _generateMockResponse(text);
-    
-    setState(() {
-      _isLoading = false;
-    });
+    try {
+      final reply = await _api.chat(sessionId: _sessionId!, message: text);
+      setState(() {
+        _isLoading = false;
+      });
 
-    _addMessage(response, isUser: false);
-  }
-
-  String _generateMockResponse(String question) {
-    // Mock responses based on common PKD questions
-    if (question.toLowerCase().contains('what is') && question.toLowerCase().contains('pkd')) {
-      return "Polycystic Kidney Disease (PKD) is a genetic disorder characterized by the growth of numerous cysts in the kidneys. These fluid-filled cysts can gradually enlarge the kidneys and reduce their function over time.\n\n*Sources: Medical literature and PKD research*";
-    } else if (question.toLowerCase().contains('symptoms')) {
-      return "Common symptoms of PKD include:\n• High blood pressure\n• Pain in the back or sides\n• Blood in urine\n• Frequent urination\n• Kidney stones\n• Headaches\n\nIt's important to consult with your healthcare provider for proper evaluation and management.\n\n*Sources: PKD Foundation, Medical journals*";
-    } else if (question.toLowerCase().contains('treatment')) {
-      return "Treatment for PKD focuses on managing symptoms and slowing disease progression:\n• Blood pressure control\n• Pain management\n• Treatment of kidney stones\n• Management of infections\n• In advanced cases, dialysis or kidney transplant\n\nAlways work with your healthcare team to develop the best treatment plan for your specific situation.\n\n*Sources: Clinical guidelines, Medical research*";
-    } else {
-      return "Thank you for your question about PKD. I'm here to provide general information and support. For specific medical advice, please consult with your healthcare provider. Could you please provide more details about what you'd like to know?\n\n*Sources: General medical knowledge*";
+      String response = reply.response;
+      // Optionally append sources if available
+      if (reply.sourceTitles.isNotEmpty) {
+        final srcTitles = reply.sourceTitles.take(3).join(', ');
+        response = '$response\n\nSources: $srcTitles';
+      }
+      _addMessage(response, isUser: false);
+    } catch (e) {
+      setState(() {
+        _isLoading = false;
+        _error = 'Failed to send message: $e';
+      });
     }
   }
+
+  // Removed mock response generator; responses now come from backend API.
 
   void _clearChat() {
     setState(() {
@@ -160,6 +178,7 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _messages.clear();
       _isSessionInitialized = false;
+      _sessionId = null;
     });
     _initializeSession();
   }
@@ -205,17 +224,11 @@ class _ChatScreenState extends State<ChatScreen> {
               children: [
                 Text(
                   'CysticCare AI',
-                  style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                  ),
+                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                 ),
                 Text(
                   'AI Support for PKD',
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.normal,
-                  ),
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.normal),
                 ),
               ],
             ),
@@ -228,6 +241,28 @@ class _ChatScreenState extends State<ChatScreen> {
       drawer: _buildDrawer(),
       body: Column(
         children: [
+          if (_error != null)
+            Container(
+              width: double.infinity,
+              color: Colors.red.shade50,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Row(
+                children: [
+                  const Icon(Icons.error_outline, color: Colors.red),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _error!,
+                      style: const TextStyle(color: Colors.red),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.red),
+                    onPressed: () => setState(() => _error = null),
+                  ),
+                ],
+              ),
+            ),
           _buildAboutSection(),
           if (!_isSessionInitialized && _isLoading)
             const Expanded(
@@ -243,9 +278,7 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             )
           else
-            Expanded(
-              child: _buildChatArea(),
-            ),
+            Expanded(child: _buildChatArea()),
         ],
       ),
     );
@@ -275,7 +308,10 @@ class _ChatScreenState extends State<ChatScreen> {
                   style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                 ),
                 SizedBox(height: 12),
-                Text('What you can ask:', style: TextStyle(fontWeight: FontWeight.bold)),
+                Text(
+                  'What you can ask:',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
                 Text('• Questions about PKD symptoms and management'),
                 Text('• Treatment options and lifestyle recommendations'),
                 Text('• Support and guidance for living with PKD'),
@@ -324,7 +360,9 @@ class _ChatScreenState extends State<ChatScreen> {
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 8),
       child: Row(
-        mainAxisAlignment: message.isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
+        mainAxisAlignment: message.isUser
+            ? MainAxisAlignment.end
+            : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (!message.isUser) ...[
@@ -342,7 +380,11 @@ class _ChatScreenState extends State<ChatScreen> {
                     return CircleAvatar(
                       backgroundColor: const Color(0xFF2E86AB),
                       radius: 20,
-                      child: const Icon(Icons.smart_toy, color: Colors.white, size: 20),
+                      child: const Icon(
+                        Icons.smart_toy,
+                        color: Colors.white,
+                        size: 20,
+                      ),
                     );
                   },
                 ),
@@ -354,7 +396,9 @@ class _ChatScreenState extends State<ChatScreen> {
             child: Container(
               padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
-                color: message.isUser ? const Color(0xFF2E86AB) : Colors.grey[100],
+                color: message.isUser
+                    ? const Color(0xFF2E86AB)
+                    : Colors.grey[100],
                 borderRadius: BorderRadius.circular(16),
               ),
               child: Text(
@@ -397,7 +441,11 @@ class _ChatScreenState extends State<ChatScreen> {
                   return CircleAvatar(
                     backgroundColor: const Color(0xFF2E86AB),
                     radius: 20,
-                    child: const Icon(Icons.smart_toy, color: Colors.white, size: 20),
+                    child: const Icon(
+                      Icons.smart_toy,
+                      color: Colors.white,
+                      size: 20,
+                    ),
                   );
                 },
               ),
@@ -443,7 +491,8 @@ class _ChatScreenState extends State<ChatScreen> {
             child: TextField(
               controller: _textController,
               decoration: InputDecoration(
-                hintText: 'Ask CysticCare AI about Polycystic Kidney Disease...',
+                hintText:
+                    'Ask CysticCare AI about Polycystic Kidney Disease...',
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(25),
                   borderSide: BorderSide(color: Colors.grey[300]!),
@@ -452,7 +501,10 @@ class _ChatScreenState extends State<ChatScreen> {
                   borderRadius: BorderRadius.circular(25),
                   borderSide: const BorderSide(color: Color(0xFF2E86AB)),
                 ),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 12,
+                ),
               ),
               maxLines: null,
               textInputAction: TextInputAction.send,
@@ -476,9 +528,7 @@ class _ChatScreenState extends State<ChatScreen> {
         padding: EdgeInsets.zero,
         children: [
           DrawerHeader(
-            decoration: const BoxDecoration(
-              color: Color(0xFF2E86AB),
-            ),
+            decoration: const BoxDecoration(color: Color(0xFF2E86AB)),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -537,22 +587,18 @@ class _ChatScreenState extends State<ChatScreen> {
             padding: EdgeInsets.all(16),
             child: Text(
               'Quick Questions',
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-              ),
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
           ),
-          ...quickQuestions.map((question) => ListTile(
-                title: Text(
-                  question,
-                  style: const TextStyle(fontSize: 14),
-                ),
-                onTap: () {
-                  Navigator.pop(context);
-                  _sendMessage(question);
-                },
-              )),
+          ...quickQuestions.map(
+            (question) => ListTile(
+              title: Text(question, style: const TextStyle(fontSize: 14)),
+              onTap: () {
+                Navigator.pop(context);
+                _sendMessage(question);
+              },
+            ),
+          ),
           const Divider(),
           const Padding(
             padding: EdgeInsets.all(16),
@@ -561,18 +607,12 @@ class _ChatScreenState extends State<ChatScreen> {
               children: [
                 Text(
                   '⚠️ Disclaimer',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                  ),
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                 ),
                 SizedBox(height: 8),
                 Text(
                   'This AI assistant provides general information only. Always consult healthcare professionals for medical advice.',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey,
-                  ),
+                  style: TextStyle(fontSize: 12, color: Colors.grey),
                 ),
               ],
             ),

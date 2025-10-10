@@ -8,6 +8,7 @@ import uuid
 
 # Your existing imports - exactly as in your original code
 import os
+from pathlib import Path
 # pygame imports removed for FastAPI
 from dotenv import load_dotenv
 import time
@@ -28,9 +29,14 @@ import PyPDF2
 import re
 
 # Your existing global variables
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent
+
+# Load .env from the same directory as this file to avoid CWD issues
+load_dotenv(dotenv_path=str(BASE_DIR / '.env'))
 api_key = os.getenv("OPEN_AI_API_KEY")
-folder = 'papers'  # Papers folder is now in app directory
+
+# Resolve papers folder relative to this file regardless of where the app is launched
+folder = str(BASE_DIR / 'papers')
 chunks = []
 model = None
 index = None
