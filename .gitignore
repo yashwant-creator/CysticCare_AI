@@ -43,4 +43,12 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Environment variables - NEVER commit these!
+.env
+*.env
 /backend/app/.env
+
+# ChromaDB data - vector database (will be regenerated on server)
+/backend/app/chroma_data/
+chroma_data/

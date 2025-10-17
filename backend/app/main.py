@@ -20,7 +20,8 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.events import Event
 from google.genai import types
-import faiss
+import chromadb
+from chromadb.config import Settings
 import numpy as np
 from sentence_transformers import SentenceTransformer
 import pdfplumber
@@ -39,7 +40,8 @@ api_key = os.getenv("OPEN_AI_API_KEY")
 folder = str(BASE_DIR / 'papers')
 chunks = []
 model = None
-index = None
+chroma_client = None  # ChromaDB client
+collection = None     # ChromaDB collection
 runner = None
 service = None
 client = None
@@ -99,10 +101,10 @@ async def initialize_agent_session():
     return session
 
 async def initialize_rag_system():
-    """Initialize your existing RAG system exactly as in your original code"""
-    global chunks, model, index, runner, service, client, authentication_event, main_agent, api_key
+    """Initialize RAG system with ChromaDB for persistent, memory-efficient storage"""
+    global chunks, model, chroma_client, collection, runner, service, client, authentication_event, main_agent, api_key
     
-    print("🚀 Initializing RAG System...")
+    print("🚀 Initializing RAG System with ChromaDB...")
     
     # Your exact initialization code
     if not api_key:
@@ -114,30 +116,65 @@ async def initialize_rag_system():
     client = openai.OpenAI(api_key=api_key)
     authentication_event = threading.Event()
 
-    # Your exact PDF processing loop
-    for filename in os.listdir(folder):
-        if filename.endswith('.pdf'):
-            pdf_path = os.path.join(folder, filename)
-            title, authors = extract_metadata(pdf_path)
-            with pdfplumber.open(pdf_path) as pdf:
-                text = ''
-                for page in pdf.pages:
-                    text += page.extract_text() or ""
-                chunked_context = chunk_up_context(text)
-                for i, para in enumerate(chunked_context):
-                    chunks.append({"text": para, "source": filename, "chunk_index": i, "title": title, "authors": authors})
+    # Initialize ChromaDB with persistent storage (disk-based, not memory!)
+    chroma_client = chromadb.PersistentClient(
+        path=str(BASE_DIR / "chroma_data")  # Stores on disk, not in RAM
+    )
+    
+    # Get or create collection
+    collection = chroma_client.get_or_create_collection(
+        name="pkd_knowledge_base",
+        metadata={"description": "PKD medical knowledge chunks"}
+    )
+    
+    # Check if we already have data (skip processing if already done)
+    existing_count = collection.count()
+    
+    if existing_count > 0:
+        print(f"✅ ChromaDB already initialized with {existing_count} chunks")
+        print("⚡ Skipping PDF processing (already done)")
+        # Just load the model for queries
+        model = SentenceTransformer('all-MiniLM-L6-v2')
+    else:
+        print("📚 First-time setup: Processing PDFs...")
+        
+        # Your exact PDF processing loop
+        for filename in os.listdir(folder):
+            if filename.endswith('.pdf'):
+                pdf_path = os.path.join(folder, filename)
+                title, authors = extract_metadata(pdf_path)
+                with pdfplumber.open(pdf_path) as pdf:
+                    text = ''
+                    for page in pdf.pages:
+                        text += page.extract_text() or ""
+                    chunked_context = chunk_up_context(text)
+                    for i, para in enumerate(chunked_context):
+                        chunks.append({"text": para, "source": filename, "chunk_index": i, "title": title, "authors": authors})
 
-    print(f"📚 Loaded {len(chunks)} chunks from PDFs")
+        print(f"📚 Loaded {len(chunks)} chunks from PDFs")
 
-    # Your exact embeddings creation
-    model = SentenceTransformer('all-MiniLM-L6-v2')
-    texts = [chunk["text"] for chunk in chunks]
-    embeddings = model.encode(texts)
+        # Your exact embeddings creation
+        model = SentenceTransformer('all-MiniLM-L6-v2')
+        texts = [chunk["text"] for chunk in chunks]
+        embeddings = model.encode(texts)
 
-    # Your exact FAISS index creation
-    dim = embeddings.shape[1]
-    index = faiss.IndexFlatL2(dim)
-    index.add(np.array(embeddings))
+        # Add to ChromaDB (replaces FAISS index creation)
+        print("💾 Storing embeddings in ChromaDB...")
+        collection.add(
+            embeddings=embeddings.tolist(),  # ChromaDB handles numpy arrays
+            documents=texts,
+            metadatas=[
+                {
+                    "source": chunk["source"],
+                    "chunk_index": chunk["chunk_index"],
+                    "title": chunk["title"],
+                    "authors": chunk["authors"]
+                } for chunk in chunks
+            ],
+            ids=[f"chunk_{i}" for i in range(len(chunks))]
+        )
+        
+        print(f"✅ Added {len(chunks)} chunks to ChromaDB")
 
     # Your exact agent initialization
     main_agent = LlmAgent(
@@ -154,23 +191,27 @@ async def initialize_rag_system():
         session_service=service,    
     )
     
-    print("✅ RAG System initialized successfully")
+    print("✅ RAG System initialized successfully with ChromaDB")
 
 async def agent_response(input: str):
-    """Your exact existing agent_response function"""
+    """Your exact existing agent_response function - now using ChromaDB"""
     global SESSION_ID
 
     input = input + " Use plain, everyday language that anyone can understand. Avoid technical terms or specialized vocabulary. Keep responses concise under 250 words unless the user wants you to explain the question in detail. Aim for clarity, simplicity, and easy readability for a general audience. If you cannot answer from the context, reply: 'Sorry unable to provide the answer. The question that you asked is outside my knowledge base. I am a chatbot designed only to answer questions about Polycystic Kidney Disease.'"
     
+    # Encode query (same as before)
     query_emb = model.encode([input])
 
-    # D is the distance between the closest vectors
-    # I is the indecies of the 1 closest vector
-    D, I = index.search(np.array(query_emb), k=3)
+    # ChromaDB search (replaces FAISS index.search)
+    results = collection.query(
+        query_embeddings=query_emb.tolist(),
+        n_results=3  # Get top 3 most similar chunks
+    )
 
-    context = "\n\n".join([chunks[i]['text'] for i in I[0]])
-    source_titles = [chunks[i]['title'] for i in I[0]]  # Retrieve titles
-    source_authors = [chunks[i]['authors'] for i in I[0]]  # Retrieve authors
+    # Extract context and metadata from ChromaDB results
+    context = "\n\n".join(results['documents'][0])
+    source_titles = [meta['title'] for meta in results['metadatas'][0]]
+    source_authors = [meta['authors'] for meta in results['metadatas'][0]]
 
     full_input__for_LLM = f"Context:/n{context}\n\n Question: {input}"
 
@@ -267,7 +308,14 @@ async def chat(request: ChatRequest):
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "chunks_loaded": len(chunks)}
+    """Health check with ChromaDB status"""
+    chroma_count = collection.count() if collection else 0
+    return {
+        "status": "healthy",
+        "chunks_in_chromadb": chroma_count,
+        "vector_store": "ChromaDB",
+        "storage": "persistent (disk-based)"
+    }
 
 @app.get("/quick-questions")
 async def get_quick_questions():
