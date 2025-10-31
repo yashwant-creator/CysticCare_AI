@@ -221,8 +221,7 @@ async def agent_response(input: str):
     
     # Check if session is initialized
     if not SESSION_ID:
-        print("Session not initialized. Initializing now...")
-        await initialize_agent_session()
+        raise Exception("Session not initialized. Please call /initialize endpoint first.")
     
     try:
         # the below line of code is used to format the input text into a content object
@@ -252,7 +251,11 @@ async def agent_response(input: str):
         print(f"Session ID: {SESSION_ID}")
         print("Sorry. something went wrong.")    
     
-    # Include source title and author information in the response
+    # If the answer is "unable to answer", return empty sources
+    if "Sorry unable to provide the answer. The question that you asked is outside my knowledge base. I am a chatbot designed only to answer questions about Polycystic Kidney Disease." in answer:
+        return answer, [], []
+    
+    # Otherwise include source title and author information in the response
     return answer, source_titles, source_authors
 
 @asynccontextmanager
@@ -275,7 +278,7 @@ app = FastAPI(
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with your Flutter app's domain
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -289,8 +292,24 @@ async def root():
 @app.post("/initialize", response_model=SessionResponse)
 async def initialize_session():
     """Initialize a new chat session"""
-    session_id = str(uuid.uuid4())
-    return SessionResponse(session_id=session_id, message="Session initialized")
+    global SESSION_ID, session
+    
+    # Create a unique session ID
+    session_id = f"session_{uuid.uuid4().hex[:8]}_{int(time.time())}"
+    SESSION_ID = session_id
+    
+    # Initialize the agent session
+    try:
+        session = await service.create_session(
+            app_name="ChatPKD Session",
+            user_id="user_main",
+            session_id=SESSION_ID
+        )
+        print(f"✅ Created and initialized session: {SESSION_ID}")
+        return SessionResponse(session_id=session_id, message="Session initialized successfully")
+    except Exception as e:
+        print(f"❌ Error initializing session: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to initialize session: {str(e)}")
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):

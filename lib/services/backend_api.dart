@@ -6,20 +6,22 @@ class BackendApi {
   /// Override at runtime with:
   /// flutter run --dart-define=BACKEND_BASE_URL=http://10.0.2.2:8000
   /// Defaults to localhost which works for iOS simulator, macOS, and web.
-  static final String _rawBase = String.fromEnvironment(
+  static const String _rawBase = String.fromEnvironment(
     'BACKEND_BASE_URL',
     defaultValue: 'http://localhost:8000',
   );
 
   // Normalize base URL (trim whitespace/newlines and trailing slashes)
-  static final String _baseUrl = (() {
-    var v = _rawBase.trim();
+  static final String _baseUrl = _normalizeUrl(_rawBase);
+  
+  static String _normalizeUrl(String url) {
+    var v = url.trim();
     // Remove any trailing slashes
     while (v.endsWith('/')) {
       v = v.substring(0, v.length - 1);
     }
     return v;
-  })();
+  }
 
   Uri _uri(String path) {
     final normalizedPath = path.startsWith('/') ? path : '/$path';
