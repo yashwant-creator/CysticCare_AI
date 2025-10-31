@@ -4,11 +4,11 @@ import 'package:http/http.dart' as http;
 /// Simple API client for the CysticCare FastAPI backend.
 class BackendApi {
   /// Override at runtime with:
-  /// flutter run --dart-define=BACKEND_BASE_URL=http://10.0.2.2:8000
+  /// flutter run --dart-define=BACKEND_BASE_URL=http://10.0.2.2:8001
   /// Defaults to localhost which works for iOS simulator, macOS, and web.
   static const String _rawBase = String.fromEnvironment(
     'BACKEND_BASE_URL',
-    defaultValue: 'http://localhost:8000',
+    defaultValue: 'http://localhost:8001',
   );
 
   // Normalize base URL (trim whitespace/newlines and trailing slashes)
