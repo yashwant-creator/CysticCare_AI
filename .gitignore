@@ -49,6 +49,13 @@ app.*.map.json
 *.env
 /backend/app/.env
 
+# Python virtual environment
+backend_env/
+venv/
+env/
+ENV/
+.venv/
+
 # ChromaDB data - vector database (will be regenerated on server)
 /backend/app/chroma_data/
 chroma_data/

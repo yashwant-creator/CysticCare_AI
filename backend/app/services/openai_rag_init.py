@@ -48,18 +48,19 @@ async def initialize_openai_rag_system(
     
     try:
         logger.info("Starting OpenAI RAG system initialization...")
-        
+
         # Load configuration
         config = load_session_config()
-        
+
         # Initialize OpenAI service
+        global openai_service
         openai_service = OpenAIService(
             embedding_model=config["embedding_model"],
             chat_model=config["chat_model"],
             max_retries=config["max_retries"],
             retry_delay=config["retry_delay"]
         )
-        
+
         # Validate connection
         if not openai_service.validate_connection():
             logger.error("Failed to validate OpenAI connection")
@@ -69,9 +70,9 @@ async def initialize_openai_rag_system(
                 "documents_processed": 0,
                 "chunks_created": 0
             }
-        
+
         logger.info("OpenAI connection validated")
-        
+
         # Initialize ChromaDB (persistent storage)
         chroma_data_path = os.path.join(
             os.path.dirname(__file__),
@@ -79,17 +80,17 @@ async def initialize_openai_rag_system(
             "openai_chroma_data"
         )
         os.makedirs(chroma_data_path, exist_ok=True)
-        
+
         logger.info(f"Initializing ChromaDB with path: {chroma_data_path}")
-        
+        # Use PersistentClient for chromadb>=1.3.0
+        global openai_chroma_client, openai_collection
         openai_chroma_client = chromadb.PersistentClient(path=chroma_data_path)
-        
+
         # Get or create collection
         try:
             openai_collection = openai_chroma_client.get_collection(name=collection_name)
             logger.info(f"Using existing ChromaDB collection: {collection_name}")
             logger.info(f"Collection contains {openai_collection.count()} vectors")
-            
             return {
                 "status": "success",
                 "message": f"ChromaDB collection '{collection_name}' already initialized",
@@ -103,10 +104,10 @@ async def initialize_openai_rag_system(
                 name=collection_name,
                 metadata={"hnsw:space": "cosine"}
             )
-        
+
         # Find and process PDFs
         pdf_directory = os.path.join(os.path.dirname(__file__), "..", pdf_directory)
-        
+
         if not os.path.exists(pdf_directory):
             logger.warning(f"PDF directory not found: {pdf_directory}")
             return {

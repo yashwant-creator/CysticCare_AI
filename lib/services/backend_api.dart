@@ -5,10 +5,10 @@ import 'package:http/http.dart' as http;
 class BackendApi {
   /// Override at runtime with:
   /// flutter run --dart-define=BACKEND_BASE_URL=http://10.0.2.2:8001
-  /// Defaults to localhost which works for iOS simulator, macOS, and web.
+  /// Defaults to production Cloud Run backend
   static const String _rawBase = String.fromEnvironment(
     'BACKEND_BASE_URL',
-    defaultValue: 'http://localhost:8001',
+    defaultValue: 'https://fastapi-backend-798621865464.us-central1.run.app',
   );
 
   // Normalize base URL (trim whitespace/newlines and trailing slashes)
@@ -37,16 +37,9 @@ class BackendApi {
   }
 
   Future<String> initializeSession() async {
-    final res = await http.post(_uri('/initialize'));
-    if (res.statusCode >= 200 && res.statusCode < 300) {
-      final data = jsonDecode(res.body) as Map<String, dynamic>;
-      final sessionId = data['session_id'] as String?;
-      if (sessionId == null || sessionId.isEmpty) {
-        throw Exception('No session_id in response');
-      }
-      return sessionId;
-    }
-    throw Exception('Initialize failed: ${res.statusCode} ${res.body}');
+    // RAG system is pre-initialized with baked-in vectors, just generate a session ID
+    // Session IDs are just used client-side for tracking conversations
+    return 'session_${DateTime.now().millisecondsSinceEpoch}';
   }
 
   Future<ChatReply> chat({
@@ -56,7 +49,7 @@ class BackendApi {
     final res = await http.post(
       _uri('/chat'),
       headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'message': message, 'session_id': sessionId}),
+      body: jsonEncode({'query': message, 'session_id': sessionId}),
     );
 
     if (res.statusCode >= 200 && res.statusCode < 300) {

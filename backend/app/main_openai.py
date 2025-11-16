@@ -5,10 +5,12 @@ Runs on port 8001 (parallel to original pipeline on 8000)
 """
 
 import os
+from dotenv import load_dotenv
 import logging
 from typing import Dict, Any, List
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from services.openai_rag_init import (
@@ -17,6 +19,8 @@ from services.openai_rag_init import (
     get_collection_stats
 )
 
+load_dotenv(os.path.join(os.path.dirname(__file__), '../.env'))  # legacy, but also try backend/.env
+load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))  # fallback for backend/.env
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -87,19 +91,15 @@ class QuickQuestionsResponse(BaseModel):
 # Lifespan Events
 # ============================================================================
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    Application lifespan - startup and shutdown
-    """
-    # Startup
-    logger.info("=" * 80)
-    logger.info("OpenAI Pipeline Backend Starting")
-    logger.info("=" * 80)
-    
+# Global flag for initialization status
+_rag_initialized = False
+_initialization_task = None
+
+async def initialize_rag_background():
+    """Initialize RAG system in background after server starts"""
+    global _rag_initialized
     try:
-        # Initialize RAG system on startup
-        logger.info("Initializing OpenAI RAG system...")
+        logger.info("Initializing OpenAI RAG system in background...")
         result = await initialize_openai_rag_system(
             pdf_directory="papers",
             collection_name="pkd_knowledge_base_openai"
@@ -110,12 +110,29 @@ async def lifespan(app: FastAPI):
         if 'total_vectors' in result:
             logger.info(f"  - Total vectors: {result['total_vectors']}")
         logger.info(result['message'])
-        
+        _rag_initialized = True
     except Exception as e:
         logger.error(f"Error during RAG initialization: {e}")
+        _rag_initialized = False
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Application lifespan - startup and shutdown
+    """
+    global _initialization_task
+    # Startup
+    logger.info("=" * 80)
+    logger.info("OpenAI Pipeline Backend Starting")
+    logger.info("=" * 80)
+    
+    # Start RAG initialization in background (non-blocking)
+    import asyncio
+    _initialization_task = asyncio.create_task(initialize_rag_background())
     
     logger.info("Application startup complete")
-    logger.info("Listening on http://0.0.0.0:8001")
+    logger.info("Listening on http://0.0.0.0:8080")
+    logger.info("RAG system will initialize in background")
     logger.info("=" * 80)
     
     yield
@@ -130,11 +147,21 @@ async def lifespan(app: FastAPI):
 # FastAPI Application
 # ============================================================================
 
+
 app = FastAPI(
     title="CysticCare AI - OpenAI Pipeline",
     description="OpenAI-based RAG pipeline for PKD knowledge base",
     version="1.0.0",
     lifespan=lifespan
+)
+
+# Add CORS middleware for local frontend development
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Change to specific origins in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -243,14 +270,28 @@ async def health_endpoint() -> HealthResponse:
         HealthResponse with status and collection statistics
     """
     try:
-        stats = get_collection_stats()
-        
-        health = HealthResponse(
-            status="healthy" if stats.get("status") == "success" else "degraded",
-            version="1.0.0",
-            timestamp=datetime.now().isoformat(),
-            collection_stats=stats
-        )
+        # Check if RAG is initialized
+        if not _rag_initialized:
+            stats = {
+                "status": "initializing",
+                "message": "RAG system is initializing in background",
+                "total_documents": 0,
+                "total_chunks": 0
+            }
+            health = HealthResponse(
+                status="initializing",
+                version="1.0.0",
+                timestamp=datetime.now().isoformat(),
+                collection_stats=stats
+            )
+        else:
+            stats = get_collection_stats()
+            health = HealthResponse(
+                status="healthy" if stats.get("status") == "success" else "degraded",
+                version="1.0.0",
+                timestamp=datetime.now().isoformat(),
+                collection_stats=stats
+            )
         
         logger.info(f"Health check - Status: {health.status}")
         return health
