@@ -54,6 +54,7 @@ class ChatRequest(BaseModel):
     top_k: int = 3
     temperature: float = 0.7
     max_tokens: int = 2000
+    use_query_rewriting: bool = True  # Enable query rewriting by default
 
 
 class SourceInfo(BaseModel):
@@ -61,7 +62,10 @@ class SourceInfo(BaseModel):
     index: int
     title: str
     author: str
+    year: str = "Unknown"
     file: str
+    citation: str = ""
+    display_name: str = ""
     relevance_score: float
 
 
@@ -216,12 +220,13 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
         logger.info(f"Chat endpoint called - Query: {request.query[:50]}...")
         logger.info(f"  Session: {request.session_id}, Top-K: {request.top_k}")
         
-        # Get RAG response
+        # Get RAG response (with query rewriting if enabled)
         result = await get_rag_response(
             query=request.query,
             top_k=request.top_k,
             temperature=request.temperature,
-            max_tokens=request.max_tokens
+            max_tokens=request.max_tokens,
+            use_query_rewriting=request.use_query_rewriting
         )
         
         if result["status"] != "success":
@@ -237,7 +242,10 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
                 index=s["index"],
                 title=s["title"],
                 author=s["author"],
+                year=s.get("year", "Unknown"),
                 file=s["file"],
+                citation=s.get("citation", ""),
+                display_name=s.get("display_name", ""),
                 relevance_score=s["relevance_score"]
             )
             for s in result.get("sources", [])

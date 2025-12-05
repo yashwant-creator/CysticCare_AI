@@ -15,6 +15,7 @@ from utils.openai_utils import (
     create_chunk_id,
     load_session_config
 )
+from utils.metadata_manager import get_metadata_manager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -130,6 +131,9 @@ async def initialize_openai_rag_system(
         
         logger.info(f"Processing {len(pdf_files)} PDF files...")
         
+        # Initialize metadata manager for enhanced metadata
+        metadata_manager = get_metadata_manager()
+        
         # Process all PDFs and collect data
         all_chunks = []
         all_metadatas = []
@@ -138,15 +142,20 @@ async def initialize_openai_rag_system(
         
         for pdf_file in pdf_files:
             try:
-                chunks, metadata = process_pdf_file(pdf_file)
+                chunks, basic_metadata = process_pdf_file(pdf_file)
+                
+                # Enhance metadata with metadata manager
+                enhanced_metadata = metadata_manager.extract_enhanced_metadata(
+                    pdf_file, basic_metadata
+                )
                 
                 for chunk_idx, chunk in enumerate(chunks):
                     all_chunks.append(chunk)
-                    all_metadatas.append(metadata)
+                    all_metadatas.append(enhanced_metadata)  # Use enhanced metadata
                     all_ids.append(create_chunk_id(os.path.basename(pdf_file), chunk_idx))
                 
                 total_chunks += len(chunks)
-                logger.info(f"✓ Processed {pdf_file}: {len(chunks)} chunks")
+                logger.info(f"✓ Processed {pdf_file}: {len(chunks)} chunks - {enhanced_metadata['display_name']}")
                 
             except Exception as e:
                 logger.error(f"✗ Error processing {pdf_file}: {e}")
@@ -275,20 +284,23 @@ async def get_rag_response(
     query: str,
     top_k: int = 3,
     temperature: float = 0.7,
-    max_tokens: int = 2000
+    max_tokens: int = 2000,
+    use_query_rewriting: bool = True
 ) -> Dict[str, Any]:
     """
     Generate a response using the RAG pattern:
-    1. Search knowledge base
-    2. Format context
-    3. Call OpenAI GPT API
-    4. Return response with sources
+    1. Rewrite query (optional, improves retrieval)
+    2. Search knowledge base
+    3. Format context
+    4. Call OpenAI GPT API
+    5. Return response with sources
     
     Args:
         query: User query
         top_k: Number of documents to retrieve
         temperature: Model temperature
         max_tokens: Maximum response tokens
+        use_query_rewriting: Whether to use query rewriting agent
         
     Returns:
         Dictionary with response and sources
@@ -305,8 +317,19 @@ async def get_rag_response(
         }
     
     try:
-        # Search knowledge base
-        search_results = await search_knowledge_base(query, top_k)
+        # Step 1: Query rewriting (if enabled)
+        search_query = query
+        if use_query_rewriting:
+            from services.query_rewriter import get_query_rewriter
+            query_rewriter = get_query_rewriter(openai_service)
+            
+            # Use simple rewriting (fast, no extra LLM call)
+            # For advanced rewriting with variations, use: rewrite_query_advanced()
+            search_query = await query_rewriter.rewrite_query_simple(query)
+            logger.info(f"Query rewritten: '{query}' → '{search_query}'")
+        
+        # Step 2: Search knowledge base with rewritten query
+        search_results = await search_knowledge_base(search_query, top_k)
         
         if search_results["status"] != "success":
             logger.error(f"Knowledge base search failed: {search_results['message']}")
@@ -324,14 +347,22 @@ async def get_rag_response(
         sources = []
         
         for i, result in enumerate(results):
-            context_parts.append(f"[Source {i+1}]\n{result['document']}")
-            
             meta = result.get("metadata", {})
+            
+            # Create better source citation
+            display_name = meta.get("display_name", f"Source {i+1}")
+            citation = meta.get("citation", "Unknown Source")
+            
+            context_parts.append(f"[Source {i+1}: {display_name}]\n{result['document']}")
+            
             sources.append({
                 "index": i + 1,
                 "title": meta.get("title", "Unknown"),
                 "author": meta.get("author", "Unknown"),
+                "year": meta.get("year", "Unknown"),
                 "file": meta.get("file_name", "Unknown"),
+                "citation": citation,
+                "display_name": display_name,
                 "relevance_score": result.get("relevance_score", 0)
             })
         
