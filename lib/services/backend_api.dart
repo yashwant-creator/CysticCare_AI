@@ -8,7 +8,7 @@ class BackendApi {
   /// Defaults to production Cloud Run backend
   static const String _rawBase = String.fromEnvironment(
     'BACKEND_BASE_URL',
-    defaultValue: 'https://fastapi-backend-798621865464.us-central1.run.app',
+    defaultValue: 'https://cysticcare-backend-798621865464.us-central1.run.app',
   );
 
   // Normalize base URL (trim whitespace/newlines and trailing slashes)
@@ -45,11 +45,18 @@ class BackendApi {
   Future<ChatReply> chat({
     required String sessionId,
     required String message,
+    bool useStepback = false,
+    bool useCoT = true,
   }) async {
     final res = await http.post(
       _uri('/chat'),
       headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({'query': message, 'session_id': sessionId}),
+      body: jsonEncode({
+        'query': message,
+        'session_id': sessionId,
+        'use_stepback': useStepback,
+        'use_cot': useCoT,
+      }),
     );
 
     if (res.statusCode >= 200 && res.statusCode < 300) {
@@ -62,6 +69,7 @@ class BackendApi {
         sourceAuthors: (data['source_authors'] as List<dynamic>? ?? [])
             .map((e) => e.toString())
             .toList(),
+        stepbackQuery: data['stepback_query']?.toString(),
       );
     }
     throw Exception('Chat failed: ${res.statusCode} ${res.body}');
@@ -72,10 +80,12 @@ class ChatReply {
   final String response;
   final List<String> sourceTitles;
   final List<String> sourceAuthors;
+  final String? stepbackQuery;
 
   ChatReply({
     required this.response,
     required this.sourceTitles,
     required this.sourceAuthors,
+    this.stepbackQuery,
   });
 }

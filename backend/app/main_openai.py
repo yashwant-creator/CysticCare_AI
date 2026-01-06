@@ -1,8 +1,3 @@
-"""
-OpenAI Pipeline Backend - Main Application
-FastAPI application for the OpenAI-based RAG pipeline
-Runs on port 8001 (parallel to original pipeline on 8000)
-"""
 
 import os
 from dotenv import load_dotenv
@@ -28,9 +23,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ============================================================================
-# Pydantic Models
-# ============================================================================
 
 class InitializeRequest(BaseModel):
     """Request model for RAG system initialization"""
@@ -55,6 +47,9 @@ class ChatRequest(BaseModel):
     temperature: float = 0.7
     max_tokens: int = 2000
     use_query_rewriting: bool = True  # Enable query rewriting by default
+    use_cot: bool = True  # Enable Chain of Thought reasoning
+    use_stepback: bool = False  # Enable Stepback Query Decomposition
+    use_adaptive_agent: bool = True  # Auto-select best agent
 
 
 class SourceInfo(BaseModel):
@@ -69,6 +64,14 @@ class SourceInfo(BaseModel):
     relevance_score: float
 
 
+class ReasoningStep(BaseModel):
+    """Model for a single reasoning step in CoT"""
+    step: int
+    sub_question: str
+    reasoning: str
+    sources_used: int
+
+
 class ChatResponse(BaseModel):
     """Response model for chat endpoint"""
     status: str
@@ -76,6 +79,9 @@ class ChatResponse(BaseModel):
     sources: List[SourceInfo]
     query: str
     timestamp: str
+    reasoning_chain: List[ReasoningStep] = []  # Empty if CoT not used
+    cot_enabled: bool = False
+    stepback_query: str = ""  # Stepback query if stepback mode used
 
 
 class HealthResponse(BaseModel):
@@ -217,17 +223,62 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
         ChatResponse with answer and sources
     """
     try:
-        logger.info(f"Chat endpoint called - Query: {request.query[:50]}...")
-        logger.info(f"  Session: {request.session_id}, Top-K: {request.top_k}")
+        # Auto-select agent if adaptive mode enabled
+        if request.use_adaptive_agent:
+            from services.adaptive_agent_selector import AdaptiveAgentSelector
+            agent_config = await AdaptiveAgentSelector.select_agent(request.query)
+            logger.info(f"Adaptive Agent Selected: {agent_config['recommendation']} (reason: {agent_config['reason']})")
+            request.use_stepback = agent_config['use_stepback']
+            request.use_cot = agent_config['use_cot']
         
-        # Get RAG response (with query rewriting if enabled)
-        result = await get_rag_response(
-            query=request.query,
-            top_k=request.top_k,
-            temperature=request.temperature,
-            max_tokens=request.max_tokens,
-            use_query_rewriting=request.use_query_rewriting
-        )
+        logger.info(f"Chat endpoint called - Query: {request.query[:50]}...")
+        logger.info(f"  Session: {request.session_id}, Top-K: {request.top_k}, CoT: {request.use_cot}, Stepback: {request.use_stepback}")
+        
+        # Use Stepback Query Decomposition if requested
+        if request.use_stepback:
+            from services.stepback_agent import StepbackAgent
+            from services.openai_rag_init import openai_service
+            
+            if openai_service is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="RAG system not initialized yet"
+                )
+            
+            stepback_agent = StepbackAgent(openai_service)
+            result = await stepback_agent.answer_with_stepback(
+                query=request.query,
+                top_k=request.top_k,
+                temperature=request.temperature,
+                max_tokens=request.max_tokens
+            )
+        # Use Chain of Thought RAG if requested
+        elif request.use_cot:
+            from services.cot_rag_service import get_cot_rag_service
+            from services.openai_rag_init import openai_service
+            
+            if openai_service is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="RAG system not initialized yet"
+                )
+            
+            cot_service = get_cot_rag_service(openai_service)
+            result = await cot_service.get_cot_rag_response(
+                query=request.query,
+                top_k_per_step=request.top_k,
+                temperature=request.temperature,
+                max_tokens=request.max_tokens
+            )
+        else:
+            # Get standard RAG response (with query rewriting if enabled)
+            result = await get_rag_response(
+                query=request.query,
+                top_k=request.top_k,
+                temperature=request.temperature,
+                max_tokens=request.max_tokens,
+                use_query_rewriting=request.use_query_rewriting
+            )
         
         if result["status"] != "success":
             logger.error(f"RAG response failed: {result['message']}")
@@ -251,12 +302,28 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
             for s in result.get("sources", [])
         ]
         
+        # Format reasoning chain if CoT was used
+        reasoning_chain = []
+        if request.use_cot and "reasoning_chain" in result:
+            reasoning_chain = [
+                ReasoningStep(
+                    step=step["step"],
+                    sub_question=step["sub_question"],
+                    reasoning=step["reasoning"],
+                    sources_used=step["sources_used"]
+                )
+                for step in result.get("reasoning_chain", [])
+            ]
+        
         response = ChatResponse(
             status="success",
             response=result["response"],
             sources=sources,
             query=request.query,
-            timestamp=datetime.now().isoformat()
+            timestamp=datetime.now().isoformat(),
+            reasoning_chain=reasoning_chain,
+            cot_enabled=request.use_cot,
+            stepback_query=result.get("stepback_query", "")
         )
         
         logger.info(f"Chat response generated successfully ({len(sources)} sources)")
@@ -267,6 +334,52 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
     except Exception as e:
         logger.error(f"Error in chat endpoint: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/analyze-query")
+async def analyze_query_endpoint(request: ChatRequest):
+    """
+    Analyze a query and show what agent would be selected
+    
+    Args:
+        request: ChatRequest with query
+        
+    Returns:
+        Agent selection recommendation and reasoning
+    """
+    try:
+        from services.adaptive_agent_selector import AdaptiveAgentSelector
+        
+        logger.info(f"Analyze query endpoint called - Query: {request.query[:50]}...")
+        
+        # Get agent selection
+        selection = await AdaptiveAgentSelector.select_agent(request.query)
+        
+        return {
+            "status": "success",
+            "query": request.query,
+            "recommendation": selection['recommendation'],
+            "reason": selection['reason'],
+            "agent_config": {
+                "use_stepback": selection['use_stepback'],
+                "use_cot": selection['use_cot']
+            },
+            "explanation": get_agent_explanation(selection['recommendation'])
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in analyze query endpoint: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def get_agent_explanation(recommendation: str) -> str:
+    """Get explanation for why this agent was selected"""
+    explanations = {
+        "stepback": "Using Stepback Query Decomposition for better context - generates broader queries to retrieve both specific and foundational knowledge.",
+        "cot": "Using Chain of Thought reasoning - breaks down complex questions into sub-questions for structured multi-step analysis.",
+        "standard_rag": "Using Standard RAG - direct retrieval and answer generation, optimal for straightforward questions."
+    }
+    return explanations.get(recommendation, "")
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -306,6 +419,56 @@ async def health_endpoint() -> HealthResponse:
         
     except Exception as e:
         logger.error(f"Error in health endpoint: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/stepback-demo")
+async def stepback_demo_endpoint(request: ChatRequest):
+    """
+    Demonstration endpoint showing stepback query generation
+    Returns both original and stepback queries with their retrieval results
+    
+    Args:
+        request: ChatRequest with query
+        
+    Returns:
+        Detailed stepback analysis
+    """
+    try:
+        from services.stepback_agent import StepbackAgent
+        from services.openai_rag_init import openai_service
+        
+        if openai_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="RAG system not initialized yet"
+            )
+        
+        stepback_agent = StepbackAgent(openai_service)
+        
+        # Generate stepback query
+        stepback_query = await stepback_agent.generate_stepback_query(request.query)
+        
+        # Get retrieval results with stepback
+        retrieval_results = await stepback_agent.retrieve_with_stepback(
+            request.query,
+            request.top_k
+        )
+        
+        return {
+            "status": "success",
+            "original_query": request.query,
+            "stepback_query": stepback_query,
+            "retrieval_stats": {
+                "original_results": retrieval_results.get("original_count", 0),
+                "stepback_results": retrieval_results.get("stepback_count", 0),
+                "combined_unique": retrieval_results.get("combined_count", 0)
+            },
+            "explanation": "The stepback query captures broader concepts to provide better context"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in stepback demo: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
