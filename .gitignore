@@ -68,3 +68,7 @@ DEPLOYMENT_ARCHITECTURE.md
 RENDER_DEPLOYMENT_GUIDE.md
 TESTING_GUIDE.md
 OPENAI_PIPELINE_MIGRATION_PLAN.md
+
+# Research papers - contains copyrighted PDFs
+/backend/app/papers/
+/backend/app/papers_metadata.json

@@ -98,7 +98,7 @@ Output ONLY the stepback question, nothing else."""
     async def retrieve_with_stepback(
         self,
         original_query: str,
-        top_k: int = 3
+        top_k: int = 5
     ) -> Dict[str, Any]:
         """
         Perform stepback retrieval:
@@ -200,7 +200,7 @@ Output ONLY the stepback question, nothing else."""
     async def answer_with_stepback(
         self,
         query: str,
-        top_k: int = 3,
+        top_k: int = 5,
         temperature: float = 0.7,
         max_tokens: int = 2000
     ) -> Dict[str, Any]:
@@ -241,6 +241,8 @@ Output ONLY the stepback question, nothing else."""
             
             # Generate answer
             system_prompt = """You are a helpful medical AI assistant specialized in Polycystic Kidney Disease (PKD).
+
+IMPORTANT: If the user's question is NOT related to PKD, kidney disease, or renal health, you MUST respond with ONLY this message: 'Sorry, I can't answer that question. I am only responsible to answer questions related to PKD.'
 
 You have been provided with medical literature from two types of searches:
 1. Specific search results directly related to the user's question

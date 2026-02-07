@@ -68,7 +68,7 @@ def parse_filename_for_metadata(filename: str) -> dict:
 def generate_metadata_template():
     """
     Generate a metadata JSON template from existing ChromaDB data
-    This creates a template that users can fill in manually
+    This merges new papers with existing metadata instead of overwriting
     """
     chroma_path = os.path.join(os.path.dirname(__file__), "openai_chroma_data")
     collection_name = "pkd_knowledge_base_openai"
@@ -77,6 +77,13 @@ def generate_metadata_template():
     logger.info("Generating metadata template from ChromaDB...")
     
     try:
+        # Load existing metadata if it exists
+        existing_metadata = {}
+        if os.path.exists(output_file):
+            with open(output_file, 'r') as f:
+                existing_metadata = json.load(f)
+            logger.info(f"✓ Loaded {len(existing_metadata)} existing entries")
+        
         # Connect to ChromaDB
         client = chromadb.PersistentClient(path=chroma_path)
         collection = client.get_collection(name=collection_name)
@@ -90,37 +97,50 @@ def generate_metadata_template():
             if filename:
                 filenames.add(filename)
         
-        # Create template with inferred metadata
-        metadata_template = {}
+        logger.info(f"✓ Found {len(filenames)} papers in ChromaDB")
         
+        # Start with existing metadata
+        metadata_template = existing_metadata.copy()
+        
+        # Add new entries for papers not in existing metadata
+        new_count = 0
         for filename in sorted(filenames):
-            # Try to infer from filename
-            inferred = parse_filename_for_metadata(filename)
-            
-            # Get title from first chunk if available
-            title = "Unknown"
-            for metadata in all_data["metadatas"]:
-                if metadata.get("file_name") == filename and metadata.get("title"):
-                    title = metadata.get("title")
-                    break
-            
-            metadata_template[filename] = {
-                "author": inferred["author"],
-                "year": inferred["year"],
-                "title": title,
-                "journal": "Unknown",
-                "notes": "Please update this entry with correct information"
-            }
+            if filename not in metadata_template:
+                # Try to infer from filename
+                inferred = parse_filename_for_metadata(filename)
+                
+                # Get title from first chunk if available
+                title = "Unknown"
+                for metadata in all_data["metadatas"]:
+                    if metadata.get("file_name") == filename and metadata.get("title"):
+                        title = metadata.get("title")
+                        break
+                
+                metadata_template[filename] = {
+                    "author": inferred["author"],
+                    "year": inferred["year"],
+                    "title": title,
+                    "journal": "Unknown",
+                    "notes": "Please update this entry with correct information"
+                }
+                new_count += 1
+                logger.info(f"  + Added new entry: {filename}")
         
-        # Save template
+        # Save merged template
         with open(output_file, 'w') as f:
             json.dump(metadata_template, f, indent=2)
         
-        logger.info(f"✓ Template generated: {output_file}")
-        logger.info(f"✓ Found {len(metadata_template)} unique papers")
-        logger.info("\nNext steps:")
-        logger.info("1. Edit papers_metadata.json with correct paper information")
-        logger.info("2. Run this script again to update ChromaDB")
+        logger.info(f"\n✓ Template updated: {output_file}")
+        logger.info(f"✓ Total papers: {len(metadata_template)}")
+        logger.info(f"✓ New papers added: {new_count}")
+        logger.info(f"✓ Existing papers preserved: {len(existing_metadata)}")
+        
+        if new_count > 0:
+            logger.info("\nNext steps:")
+            logger.info("1. Edit papers_metadata.json to update the new entries")
+            logger.info("2. Run this script again (without --generate-template) to apply metadata to ChromaDB")
+        else:
+            logger.info("\n✓ No new papers found - all papers already have metadata entries")
         
         return output_file
         

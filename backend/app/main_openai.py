@@ -43,7 +43,7 @@ class ChatRequest(BaseModel):
     """Request model for chat endpoint"""
     query: str
     session_id: str = "default"
-    top_k: int = 3
+    top_k: int = 5
     temperature: float = 0.7
     max_tokens: int = 2000
     use_query_rewriting: bool = True  # Enable query rewriting by default

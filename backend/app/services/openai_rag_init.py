@@ -216,7 +216,7 @@ async def initialize_openai_rag_system(
 
 async def search_knowledge_base(
     query: str,
-    top_k: int = 3
+    top_k: int = 5
 ) -> Dict[str, Any]:
     """
     Search the ChromaDB knowledge base for relevant documents
@@ -282,7 +282,7 @@ async def search_knowledge_base(
 
 async def get_rag_response(
     query: str,
-    top_k: int = 3,
+    top_k: int = 5,
     temperature: float = 0.7,
     max_tokens: int = 2000,
     use_query_rewriting: bool = True
@@ -372,7 +372,7 @@ async def get_rag_response(
         response = openai_service.get_chat_completion_with_context(
             context=context,
             user_query=query,
-            system_instruction="You are a helpful medical AI assistant specialized in Polycystic Kidney Disease (PKD). Provide accurate, evidence-based information based on the provided medical literature.",
+            system_instruction="You are a helpful medical AI assistant specialized in Polycystic Kidney Disease (PKD). Provide accurate, evidence-based information based on the provided medical literature.\n\nIMPORTANT: If the user's question is NOT related to PKD, kidney disease, or renal health, you MUST respond with ONLY this message: 'Sorry, I can't answer that question. I am only responsible to answer questions related to PKD.'",
             temperature=temperature,
             max_tokens=max_tokens
         )

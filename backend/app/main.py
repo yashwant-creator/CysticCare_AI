@@ -1,1 +1,0 @@
-# This file intentionally left blank. The old sentence_transformer pipeline has been removed. Use main_openai.py for the OpenAI pipeline.

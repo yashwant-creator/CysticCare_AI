@@ -268,5 +268,5 @@ def load_session_config() -> Dict[str, Any]:
         "chat_model": os.getenv("OPENAI_CHAT_MODEL", "gpt-4o"),
         "temperature": float(os.getenv("OPENAI_TEMPERATURE", "0.7")),
         "max_tokens": int(os.getenv("OPENAI_MAX_TOKENS", "2000")),
-        "top_k_results": int(os.getenv("OPENAI_TOP_K_RESULTS", "3"))
+        "top_k_results": int(os.getenv("OPENAI_TOP_K_RESULTS", "5"))
     }

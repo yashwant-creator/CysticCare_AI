@@ -61,14 +61,41 @@ class BackendApi {
 
     if (res.statusCode >= 200 && res.statusCode < 300) {
       final data = jsonDecode(res.body) as Map<String, dynamic>;
+      
+      // Parse sources array from backend
+      final sources = (data['sources'] as List<dynamic>? ?? []);
+      final sourceTitles = <String>[];
+      final sourceAuthors = <String>[];
+      final sourceCitations = <String>[];
+      
+      for (var source in sources) {
+        if (source is Map<String, dynamic>) {
+          // Use display_name (e.g., "Author 2024") if available, otherwise citation
+          final displayName = source['display_name']?.toString() ?? '';
+          final author = source['author']?.toString() ?? 'Unknown';
+          final year = source['year']?.toString() ?? '';
+          final title = source['title']?.toString() ?? '';
+          final citation = source['citation']?.toString() ?? '';
+          
+          // Create formatted citation
+          if (displayName.isNotEmpty) {
+            sourceCitations.add(displayName);
+          } else if (citation.isNotEmpty) {
+            sourceCitations.add(citation);
+          } else {
+            sourceCitations.add('$author ($year)');
+          }
+          
+          sourceTitles.add(title);
+          sourceAuthors.add('$author ($year)');
+        }
+      }
+      
       return ChatReply(
         response: (data['response'] ?? '').toString(),
-        sourceTitles: (data['source_titles'] as List<dynamic>? ?? [])
-            .map((e) => e.toString())
-            .toList(),
-        sourceAuthors: (data['source_authors'] as List<dynamic>? ?? [])
-            .map((e) => e.toString())
-            .toList(),
+        sourceTitles: sourceTitles,
+        sourceAuthors: sourceAuthors,
+        sourceCitations: sourceCitations,
         stepbackQuery: data['stepback_query']?.toString(),
       );
     }
@@ -80,12 +107,14 @@ class ChatReply {
   final String response;
   final List<String> sourceTitles;
   final List<String> sourceAuthors;
+  final List<String> sourceCitations;
   final String? stepbackQuery;
 
   ChatReply({
     required this.response,
     required this.sourceTitles,
     required this.sourceAuthors,
+    required this.sourceCitations,
     this.stepbackQuery,
   });
 }

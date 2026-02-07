@@ -85,7 +85,7 @@ Output:
     async def retrieve_for_step(
         self,
         sub_question: str,
-        top_k: int = 3
+        top_k: int = 5
     ) -> Dict[str, Any]:
         """
         Retrieve relevant documents for a specific sub-question
@@ -193,6 +193,8 @@ Your reasoning:"""
         
         system_prompt = """You are a helpful medical AI assistant specialized in Polycystic Kidney Disease (PKD).
 
+IMPORTANT: If the original question is NOT related to PKD, kidney disease, or renal health, you MUST respond with ONLY this message: 'Sorry, I can't answer that question. I am only responsible to answer questions related to PKD.'
+
 You've reasoned through a complex question step-by-step. Now synthesize your findings into a comprehensive, well-structured answer.
 
 Structure your response:
@@ -227,7 +229,7 @@ Based on this step-by-step analysis, provide a comprehensive answer:"""
     async def get_cot_rag_response(
         self,
         query: str,
-        top_k_per_step: int = 3,
+        top_k_per_step: int = 5,
         temperature: float = 0.7,
         max_tokens: int = 2000,
         max_steps: int = 5

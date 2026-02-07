@@ -194,10 +194,18 @@ class _ChatScreenState extends State<ChatScreen> {
       });
 
       String response = reply.response;
-      // Optionally append sources if available
-      if (reply.sourceTitles.isNotEmpty) {
-        final srcTitles = reply.sourceTitles.take(3).join(', ');
-        response = '$response\n\nSources: $srcTitles';
+      // Append sources/citations if available
+      if (reply.sourceCitations.isNotEmpty) {
+        response = '$response\n\n📚 Sources:\n';
+        for (int i = 0; i < reply.sourceCitations.length; i++) {
+          final citation = reply.sourceCitations[i];
+          final title = i < reply.sourceTitles.length ? reply.sourceTitles[i] : '';
+          response += '${i + 1}. $citation';
+          if (title.isNotEmpty && !citation.contains(title)) {
+            response += ' - $title';
+          }
+          response += '\n';
+        }
       }
       _addMessage(response, isUser: false);
     } catch (e) {
