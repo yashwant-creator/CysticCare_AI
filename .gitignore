@@ -58,6 +58,7 @@ ENV/
 
 # ChromaDB data - vector database (will be regenerated on server)
 /backend/app/chroma_data/
+/backend/app/openai_chroma_data/
 chroma_data/
 
 # Documentation files
