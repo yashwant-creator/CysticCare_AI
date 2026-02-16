@@ -50,6 +50,7 @@ class ChatRequest(BaseModel):
     use_cot: bool = True  # Enable Chain of Thought reasoning
     use_stepback: bool = False  # Enable Stepback Query Decomposition
     use_adaptive_agent: bool = True  # Auto-select best agent
+    pre_check_topic: bool = False  # Pre-check if question is on-topic (faster off-topic detection)
 
 
 class SourceInfo(BaseModel):
@@ -82,6 +83,7 @@ class ChatResponse(BaseModel):
     reasoning_chain: List[ReasoningStep] = []  # Empty if CoT not used
     cot_enabled: bool = False
     stepback_query: str = ""  # Stepback query if stepback mode used
+    followup_questions: List[str] = []  # Suggested follow-up questions
 
 
 class HealthResponse(BaseModel):
@@ -90,6 +92,20 @@ class HealthResponse(BaseModel):
     version: str
     timestamp: str
     collection_stats: Dict[str, Any]
+
+
+class FollowUpRequest(BaseModel):
+    """Request model for follow-up question generation"""
+    query: str
+    response: str
+    num_questions: int = 3
+
+
+class FollowUpResponse(BaseModel):
+    """Response model for follow-up question generation"""
+    status: str
+    followup_questions: List[str]
+    original_query: str
 
 
 class QuickQuestionsResponse(BaseModel):
@@ -234,6 +250,34 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
         logger.info(f"Chat endpoint called - Query: {request.query[:50]}...")
         logger.info(f"  Session: {request.session_id}, Top-K: {request.top_k}, CoT: {request.use_cot}, Stepback: {request.use_stepback}")
         
+        # Optional: Pre-check if question is on-topic (saves API calls for off-topic questions)
+        if request.pre_check_topic:
+            from services.openai_rag_init import openai_service
+            from utils.prompt_guard import is_question_on_topic, get_off_topic_response
+            
+            if openai_service is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="RAG system not initialized yet"
+                )
+            
+            topic_check = await is_question_on_topic(request.query, openai_service)
+            logger.info(f"Topic check: {topic_check}")
+            
+            if not topic_check.get("on_topic", True):
+                logger.info("Question detected as off-topic, returning standard message")
+                off_topic_response = get_off_topic_response()
+                return ChatResponse(
+                    status="success",
+                    response=off_topic_response["response"],
+                    sources=[],
+                    query=request.query,
+                    timestamp=datetime.now().isoformat(),
+                    reasoning_chain=[],
+                    cot_enabled=False,
+                    stepback_query=""
+                )
+        
         # Use Stepback Query Decomposition if requested
         if request.use_stepback:
             from services.stepback_agent import StepbackAgent
@@ -315,6 +359,21 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
                 for step in result.get("reasoning_chain", [])
             ]
         
+        # Generate follow-up questions using the FollowUpAgent
+        followup_questions: List[str] = []
+        try:
+            from services.followup_agent import FollowUpAgent
+            from services.openai_rag_init import openai_service as _oai_svc
+            if _oai_svc is not None:
+                followup_agent = FollowUpAgent(_oai_svc)
+                followup_questions = await followup_agent.generate_followup_questions(
+                    query=request.query,
+                    response=result["response"],
+                )
+                logger.info(f"Generated {len(followup_questions)} follow-up questions")
+        except Exception as fu_err:
+            logger.warning(f"Follow-up question generation failed (non-fatal): {fu_err}")
+
         response = ChatResponse(
             status="success",
             response=result["response"],
@@ -323,7 +382,8 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
             timestamp=datetime.now().isoformat(),
             reasoning_chain=reasoning_chain,
             cot_enabled=request.use_cot,
-            stepback_query=result.get("stepback_query", "")
+            stepback_query=result.get("stepback_query", ""),
+            followup_questions=followup_questions,
         )
         
         logger.info(f"Chat response generated successfully ({len(sources)} sources)")
@@ -472,6 +532,49 @@ async def stepback_demo_endpoint(request: ChatRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/followup", response_model=FollowUpResponse)
+async def followup_endpoint(request: FollowUpRequest) -> FollowUpResponse:
+    """
+    Generate follow-up questions based on a previous query and its response.
+    
+    Args:
+        request: FollowUpRequest with the original query, AI response, and optional count
+        
+    Returns:
+        FollowUpResponse with suggested follow-up questions
+    """
+    try:
+        from services.followup_agent import FollowUpAgent
+        from services.openai_rag_init import openai_service
+        
+        if openai_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="RAG system not initialized yet"
+            )
+        
+        logger.info(f"Follow-up endpoint called - Original query: {request.query[:50]}...")
+        
+        followup_agent = FollowUpAgent(openai_service)
+        questions = await followup_agent.generate_followup_questions(
+            query=request.query,
+            response=request.response,
+            num_questions=request.num_questions,
+        )
+        
+        return FollowUpResponse(
+            status="success",
+            followup_questions=questions,
+            original_query=request.query,
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in followup endpoint: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/quick-questions", response_model=QuickQuestionsResponse)
 async def quick_questions_endpoint() -> QuickQuestionsResponse:
     """
@@ -505,6 +608,7 @@ async def root():
         "endpoints": {
             "POST /initialize": "Initialize RAG system with PDFs",
             "POST /chat": "Chat with the AI (RAG response)",
+            "POST /followup": "Generate follow-up questions for a query/response pair",
             "GET /health": "Health check",
             "GET /quick-questions": "Get suggested questions",
             "GET /docs": "API documentation (Swagger UI)",

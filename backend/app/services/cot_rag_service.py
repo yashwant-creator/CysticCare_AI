@@ -7,6 +7,7 @@ import logging
 from typing import Dict, Any, List, Optional
 from services.openai_service import OpenAIService
 from services.openai_rag_init import search_knowledge_base
+from utils.prompt_guard import COT_RAG_SYSTEM_PROMPT
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -191,19 +192,7 @@ Your reasoning:"""
         
         reasoning_summary = "\n\n".join(chain_of_thought)
         
-        system_prompt = """You are a helpful medical AI assistant specialized in Polycystic Kidney Disease (PKD).
-
-IMPORTANT: If the original question is NOT related to PKD, kidney disease, or renal health, you MUST respond with ONLY this message: 'Sorry, I can't answer that question. I am only responsible to answer questions related to PKD.'
-
-You've reasoned through a complex question step-by-step. Now synthesize your findings into a comprehensive, well-structured answer.
-
-Structure your response:
-1. Start with a direct answer to the main question
-2. Provide detailed explanation with evidence from your reasoning
-3. Include relevant clinical implications or recommendations if applicable
-4. End with any important caveats or notes
-
-Write clearly and professionally, as if explaining to a patient or medical student."""
+        system_prompt = COT_RAG_SYSTEM_PROMPT
         
         user_message = f"""ORIGINAL QUESTION: {original_query}
 
@@ -328,14 +317,23 @@ Based on this step-by-step analysis, provide a comprehensive answer:"""
                 max_tokens
             )
             
-            # Deduplicate sources by file name
+            # Deduplicate sources by file name, keeping the highest relevance score
+            # Also track which steps used each source for better context
             unique_sources = {}
             for source in all_sources:
                 key = source["file"]
-                if key not in unique_sources or source["relevance_score"] > unique_sources[key]["relevance_score"]:
-                    unique_sources[key] = source
+                if key not in unique_sources:
+                    unique_sources[key] = source.copy()
+                    unique_sources[key]["steps_used"] = [source["step"]]
+                else:
+                    # Update if this has higher relevance
+                    if source["relevance_score"] > unique_sources[key]["relevance_score"]:
+                        unique_sources[key]["relevance_score"] = source["relevance_score"]
+                    # Track all steps where this source was used
+                    if source["step"] not in unique_sources[key]["steps_used"]:
+                        unique_sources[key]["steps_used"].append(source["step"])
             
-            # Re-index sources
+            # Sort by relevance score and re-index
             final_sources = []
             for i, source in enumerate(sorted(unique_sources.values(), key=lambda x: -x["relevance_score"]), 1):
                 source["index"] = i

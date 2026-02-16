@@ -234,7 +234,7 @@ class MetadataManager:
             title: Paper title
             
         Returns:
-            Formatted citation string
+            Formatted citation string (shortened for readability)
         """
         if author == "Unknown" or author == "":
             author = "Unknown Author"
@@ -243,7 +243,28 @@ class MetadataManager:
         if title == "Unknown" or title == "":
             title = "Untitled"
         
-        return f"{author} ({year}). {title}"
+        # Shorten very long titles for better readability
+        short_title = self._shorten_title(title, max_length=80)
+        
+        return f"{author} ({year}). {short_title}"
+    
+    def _shorten_title(self, title: str, max_length: int = 80) -> str:
+        """
+        Shorten a title to a maximum length while preserving meaning
+        
+        Args:
+            title: Full title string
+            max_length: Maximum character length
+            
+        Returns:
+            Shortened title
+        """
+        if len(title) <= max_length:
+            return title
+        
+        # Find last complete word before max_length
+        shortened = title[:max_length].rsplit(' ', 1)[0]
+        return shortened + "..."
     
     def _create_display_name(self, author: str, year: str) -> str:
         """

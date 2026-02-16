@@ -70,33 +70,34 @@ class BackendApi {
       
       for (var source in sources) {
         if (source is Map<String, dynamic>) {
-          // Use display_name (e.g., "Author 2024") if available, otherwise citation
-          final displayName = source['display_name']?.toString() ?? '';
           final author = source['author']?.toString() ?? 'Unknown';
           final year = source['year']?.toString() ?? '';
           final title = source['title']?.toString() ?? '';
-          final citation = source['citation']?.toString() ?? '';
           
-          // Create formatted citation
-          if (displayName.isNotEmpty) {
-            sourceCitations.add(displayName);
-          } else if (citation.isNotEmpty) {
-            sourceCitations.add(citation);
-          } else {
-            sourceCitations.add('$author ($year)');
-          }
+          // Create consistent, clean formatting
+          final authorYear = year.isNotEmpty ? '$author ($year)' : author;
           
           sourceTitles.add(title);
-          sourceAuthors.add('$author ($year)');
+          sourceAuthors.add(authorYear);
+          sourceCitations.add(authorYear);
         }
       }
       
+      // Parse follow-up questions
+      final followupQuestions = <String>[];
+      if (data['followup_questions'] is List) {
+        for (var q in data['followup_questions']) {
+          followupQuestions.add(q.toString());
+        }
+      }
+
       return ChatReply(
         response: (data['response'] ?? '').toString(),
         sourceTitles: sourceTitles,
         sourceAuthors: sourceAuthors,
         sourceCitations: sourceCitations,
         stepbackQuery: data['stepback_query']?.toString(),
+        followupQuestions: followupQuestions,
       );
     }
     throw Exception('Chat failed: ${res.statusCode} ${res.body}');
@@ -109,6 +110,7 @@ class ChatReply {
   final List<String> sourceAuthors;
   final List<String> sourceCitations;
   final String? stepbackQuery;
+  final List<String> followupQuestions;
 
   ChatReply({
     required this.response,
@@ -116,5 +118,6 @@ class ChatReply {
     required this.sourceAuthors,
     required this.sourceCitations,
     this.stepbackQuery,
+    this.followupQuestions = const [],
   });
 }

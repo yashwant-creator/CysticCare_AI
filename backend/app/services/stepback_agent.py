@@ -7,6 +7,7 @@ import logging
 from typing import Dict, Any, List, Tuple
 from services.openai_service import OpenAIService
 from services.openai_rag_init import search_knowledge_base
+from utils.prompt_guard import STEPBACK_SYSTEM_PROMPT
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -227,34 +228,19 @@ Output ONLY the stepback question, nothing else."""
             context_parts = []
             for i, doc in enumerate(retrieval_results["results"][:top_k * 2]):
                 metadata = doc.get("metadata", {})
-                content = doc.get("content", "")
+                content = doc.get("document", "")  # Fixed: use 'document' not 'content'
                 source_type = doc.get("retrieval_source", "unknown")
+                display_name = metadata.get("display_name", f"Source {i+1}")
                 
                 context_parts.append(
-                    f"[Source {i+1} - {source_type}] "
-                    f"{metadata.get('title', 'Unknown')} "
-                    f"({metadata.get('author', 'Unknown Author')}, {metadata.get('year', 'N/A')})\n"
+                    f"[Source {i+1} - {source_type}: {display_name}]\n"
                     f"{content}\n"
                 )
             
             context = "\n".join(context_parts)
             
-            # Generate answer
-            system_prompt = """You are a helpful medical AI assistant specialized in Polycystic Kidney Disease (PKD).
-
-IMPORTANT: If the user's question is NOT related to PKD, kidney disease, or renal health, you MUST respond with ONLY this message: 'Sorry, I can't answer that question. I am only responsible to answer questions related to PKD.'
-
-You have been provided with medical literature from two types of searches:
-1. Specific search results directly related to the user's question
-2. Broader conceptual search results providing foundational knowledge
-
-Use both types of information to provide a comprehensive, accurate answer that:
-- Directly addresses the specific question
-- Provides relevant background and context from broader principles
-- Cites evidence from the sources when making claims
-- Acknowledges uncertainty when information is limited
-
-Be clear, concise, and helpful. If the question involves medical decisions, remind users to consult their healthcare provider."""
+            # Generate answer with guardrails
+            system_prompt = STEPBACK_SYSTEM_PROMPT
 
             user_message = f"""USER QUESTION: {query}
 
@@ -279,10 +265,10 @@ Please provide a comprehensive answer based on the sources above."""
                     "title": metadata.get("title", "Unknown"),
                     "author": metadata.get("author", "Unknown Author"),
                     "year": metadata.get("year", "Unknown"),
-                    "file": metadata.get("file", "unknown.pdf"),
+                    "file": metadata.get("file_name", "unknown.pdf"),
                     "citation": metadata.get("citation", ""),
                     "display_name": metadata.get("display_name", ""),
-                    "relevance_score": doc.get("distance", 0.0)
+                    "relevance_score": doc.get("relevance_score", 0.0)
                 })
             
             return {

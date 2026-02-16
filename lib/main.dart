@@ -57,6 +57,7 @@ class _ChatScreenState extends State<ChatScreen> {
   String? _sessionId;
   String? _error;
   bool _disclaimerAccepted = false;
+  List<String> _followupQuestions = [];
 
   static const List<String> quickQuestions = [
     "What is Polycystic Kidney Disease?",
@@ -185,26 +186,30 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _isLoading = true;
       _error = null;
+      _followupQuestions = [];
     });
 
     try {
       final reply = await _api.chat(sessionId: _sessionId!, message: text);
       setState(() {
         _isLoading = false;
+        _followupQuestions = reply.followupQuestions;
       });
 
       String response = reply.response;
       // Append sources/citations if available
       if (reply.sourceCitations.isNotEmpty) {
-        response = '$response\n\n📚 Sources:\n';
+        response = '$response\n\n━━━━━━━━━━━━━━━━\n📚 Sources:\n\n';
         for (int i = 0; i < reply.sourceCitations.length; i++) {
-          final citation = reply.sourceCitations[i];
+          final authorYear = reply.sourceCitations[i];
           final title = i < reply.sourceTitles.length ? reply.sourceTitles[i] : '';
-          response += '${i + 1}. $citation';
-          if (title.isNotEmpty && !citation.contains(title)) {
-            response += ' - $title';
+          
+          // Clean, professional format: [1] Author (Year): Title
+          response += '[${i + 1}] $authorYear';
+          if (title.isNotEmpty && title != 'Unknown') {
+            response += ':\n    "$title"';
           }
-          response += '\n';
+          response += '\n\n';
         }
       }
       _addMessage(response, isUser: false);
@@ -340,6 +345,8 @@ class _ChatScreenState extends State<ChatScreen> {
             )
           else
             Expanded(child: _buildChatArea()),
+        if (_followupQuestions.isNotEmpty && !_isLoading)
+          _buildFollowUpSuggestions(),
         ],
       ),
     );
@@ -526,6 +533,49 @@ class _ChatScreenState extends State<ChatScreen> {
                 fontStyle: FontStyle.italic,
               ),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFollowUpSuggestions() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.grey[50],
+        border: Border(
+          top: BorderSide(color: Colors.grey[200]!),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Suggested follow-up questions:',
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: Color(0xFF2E86AB),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: _followupQuestions.map((question) {
+              return ActionChip(
+                label: Text(
+                  question,
+                  style: const TextStyle(fontSize: 13),
+                ),
+                backgroundColor: Colors.white,
+                side: const BorderSide(color: Color(0xFF2E86AB)),
+                labelStyle: const TextStyle(color: Color(0xFF2E86AB)),
+                onPressed: () => _sendMessage(question),
+              );
+            }).toList(),
           ),
         ],
       ),

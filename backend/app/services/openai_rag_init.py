@@ -16,6 +16,7 @@ from utils.openai_utils import (
     load_session_config
 )
 from utils.metadata_manager import get_metadata_manager
+from utils.prompt_guard import STANDARD_RAG_SYSTEM_PROMPT
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -368,11 +369,11 @@ async def get_rag_response(
         
         context = "\n\n".join(context_parts)
         
-        # Get response from OpenAI
+        # Get response from OpenAI with guardrails
         response = openai_service.get_chat_completion_with_context(
             context=context,
             user_query=query,
-            system_instruction="You are a helpful medical AI assistant specialized in Polycystic Kidney Disease (PKD). Provide accurate, evidence-based information based on the provided medical literature.\n\nIMPORTANT: If the user's question is NOT related to PKD, kidney disease, or renal health, you MUST respond with ONLY this message: 'Sorry, I can't answer that question. I am only responsible to answer questions related to PKD.'",
+            system_instruction=STANDARD_RAG_SYSTEM_PROMPT,
             temperature=temperature,
             max_tokens=max_tokens
         )
