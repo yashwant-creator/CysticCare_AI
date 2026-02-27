@@ -32,11 +32,13 @@ class ChatMessage {
   final String content;
   final bool isUser;
   final DateTime timestamp;
+  final ValidationInfo? validation;
 
   ChatMessage({
     required this.content,
     required this.isUser,
     required this.timestamp,
+    this.validation,
   });
 }
 
@@ -148,13 +150,14 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  void _addMessage(String content, {required bool isUser}) {
+  void _addMessage(String content, {required bool isUser, ValidationInfo? validation}) {
     setState(() {
       _messages.add(
         ChatMessage(
           content: content,
           isUser: isUser,
           timestamp: DateTime.now(),
+          validation: validation,
         ),
       );
     });
@@ -212,7 +215,7 @@ class _ChatScreenState extends State<ChatScreen> {
           response += '\n\n';
         }
       }
-      _addMessage(response, isUser: false);
+      _addMessage(response, isUser: false, validation: reply.validation);
     } catch (e) {
       setState(() {
         _isLoading = false;
@@ -461,21 +464,30 @@ class _ChatScreenState extends State<ChatScreen> {
             const SizedBox(width: 8),
           ],
           Flexible(
-            child: Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: message.isUser
-                    ? const Color(0xFF2E86AB)
-                    : Colors.grey[100],
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Text(
-                message.content,
-                style: TextStyle(
-                  color: message.isUser ? Colors.white : Colors.black87,
-                  fontSize: 16,
+            child: Column(
+              crossAxisAlignment: message.isUser
+                  ? CrossAxisAlignment.end
+                  : CrossAxisAlignment.start,
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: message.isUser
+                        ? const Color(0xFF2E86AB)
+                        : Colors.grey[100],
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Text(
+                    message.content,
+                    style: TextStyle(
+                      color: message.isUser ? Colors.white : Colors.black87,
+                      fontSize: 16,
+                    ),
+                  ),
                 ),
-              ),
+                if (!message.isUser && message.validation != null)
+                  _buildValidationBadge(message.validation!),
+              ],
             ),
           ),
           if (message.isUser) ...[
@@ -488,6 +500,171 @@ class _ChatScreenState extends State<ChatScreen> {
         ],
       ),
     );
+  }
+
+  Widget _buildValidationBadge(ValidationInfo validation) {
+    final score = (validation.overallScore * 100).round();
+    final Color badgeColor;
+    final IconData badgeIcon;
+    final String label;
+
+    if (validation.passed) {
+      badgeColor = const Color(0xFF4CAF50); // green
+      badgeIcon = Icons.verified;
+      label = 'Validated $score%';
+    } else if (validation.overallScore >= 0.5) {
+      badgeColor = const Color(0xFFFFA726); // orange
+      badgeIcon = Icons.warning_amber_rounded;
+      label = 'Caution $score%';
+    } else {
+      badgeColor = const Color(0xFFEF5350); // red
+      badgeIcon = Icons.error_outline;
+      label = 'Low confidence $score%';
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: GestureDetector(
+        onTap: () => _showValidationDetails(validation),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          decoration: BoxDecoration(
+            color: badgeColor.withValues(alpha: 0.12),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: badgeColor.withValues(alpha: 0.3)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(badgeIcon, size: 14, color: badgeColor),
+              const SizedBox(width: 4),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: badgeColor,
+                ),
+              ),
+              if (validation.wasRegenerated) ...[
+                const SizedBox(width: 4),
+                Icon(Icons.autorenew, size: 12, color: badgeColor),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showValidationDetails(ValidationInfo validation) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    validation.passed ? Icons.verified : Icons.warning_amber_rounded,
+                    color: validation.passed
+                        ? const Color(0xFF4CAF50)
+                        : const Color(0xFFFFA726),
+                    size: 24,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Answer Validation — ${(validation.overallScore * 100).round()}%',
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+              if (validation.wasRegenerated)
+                const Padding(
+                  padding: EdgeInsets.only(top: 8),
+                  child: Text(
+                    'This answer was automatically improved by the validation agent.',
+                    style: TextStyle(fontSize: 13, fontStyle: FontStyle.italic, color: Colors.black54),
+                  ),
+                ),
+              const SizedBox(height: 16),
+              ...validation.checks.entries.map((entry) {
+                final name = entry.key;
+                final check = entry.value;
+                final pct = (check.score * 100).round();
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(
+                    children: [
+                      Icon(
+                        check.passed ? Icons.check_circle : Icons.cancel,
+                        size: 18,
+                        color: check.passed ? const Color(0xFF4CAF50) : const Color(0xFFEF5350),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          _formatCheckName(name),
+                          style: const TextStyle(fontSize: 14),
+                        ),
+                      ),
+                      Text(
+                        '$pct%',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: check.passed ? const Color(0xFF4CAF50) : const Color(0xFFEF5350),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }),
+              if (validation.warnings.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                const Text(
+                  'Warnings:',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.black54),
+                ),
+                const SizedBox(height: 4),
+                ...validation.warnings.map(
+                  (w) => Padding(
+                    padding: const EdgeInsets.only(left: 8, top: 2),
+                    child: Text('• $w', style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                  ),
+                ),
+              ],
+              const SizedBox(height: 16),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  String _formatCheckName(String key) {
+    switch (key) {
+      case 'faithfulness':
+        return 'Faithfulness';
+      case 'relevance':
+        return 'Relevance';
+      case 'source_attribution':
+        return 'Source Attribution';
+      case 'safety':
+        return 'Safety & Disclaimers';
+      default:
+        return key;
+    }
   }
 
   Widget _buildTypingIndicator() {

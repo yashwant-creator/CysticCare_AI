@@ -2,7 +2,7 @@
 import os
 from dotenv import load_dotenv
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from datetime import datetime
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -51,6 +51,7 @@ class ChatRequest(BaseModel):
     use_stepback: bool = False  # Enable Stepback Query Decomposition
     use_adaptive_agent: bool = True  # Auto-select best agent
     pre_check_topic: bool = False  # Pre-check if question is on-topic (faster off-topic detection)
+    use_validation: bool = True  # Enable answer validation agent
 
 
 class SourceInfo(BaseModel):
@@ -73,6 +74,21 @@ class ReasoningStep(BaseModel):
     sources_used: int
 
 
+class ValidationCheckInfo(BaseModel):
+    """Information about a single validation check"""
+    passed: bool
+    score: float
+
+
+class ValidationInfo(BaseModel):
+    """Validation results attached to a chat response"""
+    passed: bool
+    overall_score: float
+    checks: Dict[str, ValidationCheckInfo] = {}
+    warnings: List[str] = []
+    was_regenerated: bool = False
+
+
 class ChatResponse(BaseModel):
     """Response model for chat endpoint"""
     status: str
@@ -84,6 +100,7 @@ class ChatResponse(BaseModel):
     cot_enabled: bool = False
     stepback_query: str = ""  # Stepback query if stepback mode used
     followup_questions: List[str] = []  # Suggested follow-up questions
+    validation: Optional[ValidationInfo] = None  # Validation results (if enabled)
 
 
 class HealthResponse(BaseModel):
@@ -374,9 +391,58 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
         except Exception as fu_err:
             logger.warning(f"Follow-up question generation failed (non-fatal): {fu_err}")
 
+        # ── Answer Validation Agent ─────────────────────────────────────
+        validation_info: Optional[ValidationInfo] = None
+        final_response_text = result["response"]
+
+        if request.use_validation:
+            try:
+                from services.validation_agent import ValidationAgent
+                from services.openai_rag_init import openai_service as _val_svc
+                if _val_svc is not None:
+                    validation_agent = ValidationAgent(_val_svc)
+                    retrieved_chunks = result.get("retrieved_chunks", [])
+
+                    # Determine which agent produced the answer (for logging)
+                    agent_type = "standard_rag"
+                    if request.use_stepback:
+                        agent_type = "stepback"
+                    elif request.use_cot:
+                        agent_type = "cot"
+
+                    val_result = await validation_agent.validate_and_retry(
+                        query=request.query,
+                        answer=result["response"],
+                        retrieved_chunks=retrieved_chunks,
+                        agent_type=agent_type,
+                        temperature=request.temperature,
+                        max_tokens=request.max_tokens,
+                    )
+
+                    final_response_text = val_result["answer"]
+                    val_data = val_result["validation"].to_dict()
+
+                    validation_info = ValidationInfo(
+                        passed=val_data["passed"],
+                        overall_score=val_data["overall_score"],
+                        checks={
+                            k: ValidationCheckInfo(passed=v["passed"], score=v["score"])
+                            for k, v in val_data["checks"].items()
+                        },
+                        warnings=val_data.get("warnings", []),
+                        was_regenerated=val_result["was_regenerated"],
+                    )
+                    logger.info(
+                        f"Validation: passed={validation_info.passed}, "
+                        f"score={validation_info.overall_score:.2f}, "
+                        f"regenerated={validation_info.was_regenerated}"
+                    )
+            except Exception as val_err:
+                logger.warning(f"Validation agent failed (non-fatal): {val_err}")
+
         response = ChatResponse(
             status="success",
-            response=result["response"],
+            response=final_response_text,
             sources=sources,
             query=request.query,
             timestamp=datetime.now().isoformat(),
@@ -384,6 +450,7 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
             cot_enabled=request.use_cot,
             stepback_query=result.get("stepback_query", ""),
             followup_questions=followup_questions,
+            validation=validation_info,
         )
         
         logger.info(f"Chat response generated successfully ({len(sources)} sources)")

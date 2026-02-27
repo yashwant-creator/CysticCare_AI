@@ -91,6 +91,35 @@ class BackendApi {
         }
       }
 
+      // Parse validation info
+      ValidationInfo? validationInfo;
+      if (data['validation'] is Map<String, dynamic>) {
+        final valData = data['validation'] as Map<String, dynamic>;
+        final checksRaw = valData['checks'] as Map<String, dynamic>? ?? {};
+        final checks = <String, ValidationCheckResult>{};
+        checksRaw.forEach((key, value) {
+          if (value is Map<String, dynamic>) {
+            checks[key] = ValidationCheckResult(
+              passed: value['passed'] as bool? ?? true,
+              score: (value['score'] as num?)?.toDouble() ?? 0.0,
+            );
+          }
+        });
+        final warnings = <String>[];
+        if (valData['warnings'] is List) {
+          for (var w in valData['warnings']) {
+            warnings.add(w.toString());
+          }
+        }
+        validationInfo = ValidationInfo(
+          passed: valData['passed'] as bool? ?? true,
+          overallScore: (valData['overall_score'] as num?)?.toDouble() ?? 0.0,
+          checks: checks,
+          warnings: warnings,
+          wasRegenerated: valData['was_regenerated'] as bool? ?? false,
+        );
+      }
+
       return ChatReply(
         response: (data['response'] ?? '').toString(),
         sourceTitles: sourceTitles,
@@ -98,6 +127,7 @@ class BackendApi {
         sourceCitations: sourceCitations,
         stepbackQuery: data['stepback_query']?.toString(),
         followupQuestions: followupQuestions,
+        validation: validationInfo,
       );
     }
     throw Exception('Chat failed: ${res.statusCode} ${res.body}');
@@ -111,6 +141,7 @@ class ChatReply {
   final List<String> sourceCitations;
   final String? stepbackQuery;
   final List<String> followupQuestions;
+  final ValidationInfo? validation;
 
   ChatReply({
     required this.response,
@@ -119,5 +150,29 @@ class ChatReply {
     required this.sourceCitations,
     this.stepbackQuery,
     this.followupQuestions = const [],
+    this.validation,
+  });
+}
+
+class ValidationCheckResult {
+  final bool passed;
+  final double score;
+
+  ValidationCheckResult({required this.passed, required this.score});
+}
+
+class ValidationInfo {
+  final bool passed;
+  final double overallScore;
+  final Map<String, ValidationCheckResult> checks;
+  final List<String> warnings;
+  final bool wasRegenerated;
+
+  ValidationInfo({
+    required this.passed,
+    required this.overallScore,
+    required this.checks,
+    this.warnings = const [],
+    this.wasRegenerated = false,
   });
 }

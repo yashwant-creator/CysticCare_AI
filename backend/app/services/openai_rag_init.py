@@ -384,7 +384,8 @@ async def get_rag_response(
             "status": "success",
             "response": response,
             "sources": sources,
-            "query": query
+            "query": query,
+            "retrieved_chunks": results  # raw chunks for validation agent
         }
         
     except Exception as e:

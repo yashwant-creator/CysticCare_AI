@@ -247,6 +247,7 @@ Based on this step-by-step analysis, provide a comprehensive answer:"""
             # Step 2: Process each sub-question
             reasoning_steps = []
             all_sources = []
+            all_sources_raw = []  # raw chunks for validation agent
             previous_findings = []
             
             for i, sub_question in enumerate(sub_questions):
@@ -279,6 +280,7 @@ Based on this step-by-step analysis, provide a comprehensive answer:"""
                         "step": i + 1
                     }
                     all_sources.append(source_info)
+                    all_sources_raw.append(result)  # raw chunk for validation
                 
                 context = "\n\n".join(context_parts)
                 
@@ -347,7 +349,8 @@ Based on this step-by-step analysis, provide a comprehensive answer:"""
                 "reasoning_chain": reasoning_steps,
                 "sources": final_sources,
                 "query": query,
-                "cot_enabled": True
+                "cot_enabled": True,
+                "retrieved_chunks": all_sources_raw  # raw chunks for validation agent
             }
             
         except Exception as e:

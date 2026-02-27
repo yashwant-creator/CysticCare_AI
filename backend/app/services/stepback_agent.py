@@ -277,6 +277,7 @@ Please provide a comprehensive answer based on the sources above."""
                 "original_query": query,
                 "stepback_query": retrieval_results.get("stepback_query", ""),
                 "sources": formatted_sources,
+                "retrieved_chunks": retrieval_results.get("results", []),  # raw chunks for validation agent
                 "retrieval_metadata": {
                     "original_count": retrieval_results.get("original_count", 0),
                     "stepback_count": retrieval_results.get("stepback_count", 0),
