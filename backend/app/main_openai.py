@@ -1,5 +1,5 @@
-
 import os
+import sys
 from dotenv import load_dotenv
 import logging
 from typing import Dict, Any, List, Optional
@@ -8,11 +8,18 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
-from services.openai_rag_init import (
+from .services.openai_rag_init import (
     initialize_openai_rag_system,
     get_rag_response,
     get_collection_stats
 )
+from .utils.refusal_utils import (
+    REFUSAL_MESSAGE,
+    get_guardrail_response,
+    is_refusal_response,
+    normalize_refusal_response,
+)
+from .integrations.traceai import setup_traceai
 
 load_dotenv(os.path.join(os.path.dirname(__file__), '../.env'))  # legacy, but also try backend/.env
 load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))  # fallback for backend/.env
@@ -22,6 +29,30 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+def build_empty_chat_response(request: "ChatRequest", response_text: str) -> "ChatResponse":
+    """Return a response payload with no sources or follow-up questions."""
+    return ChatResponse(
+        status="success",
+        response=response_text,
+        sources=[],
+        query=request.query,
+        timestamp=datetime.now().isoformat(),
+        reasoning_chain=[],
+        cot_enabled=False,
+        stepback_query="",
+        followup_questions=[],
+        validation=None,
+    )
+
+
+def build_refusal_chat_response(request: "ChatRequest", response_text: str) -> "ChatResponse":
+    """Return a response payload with no sources for refusal cases."""
+    return build_empty_chat_response(
+        request,
+        normalize_refusal_response(response_text),
+    )
 
 
 class InitializeRequest(BaseModel):
@@ -50,7 +81,7 @@ class ChatRequest(BaseModel):
     use_cot: bool = True  # Enable Chain of Thought reasoning
     use_stepback: bool = False  # Enable Stepback Query Decomposition
     use_adaptive_agent: bool = True  # Auto-select best agent
-    pre_check_topic: bool = False  # Pre-check if question is on-topic (faster off-topic detection)
+    pre_check_topic: bool = False  # Legacy flag; topic gating is handled inside agent prompts
     use_validation: bool = True  # Enable answer validation agent
 
 
@@ -153,7 +184,9 @@ async def initialize_rag_background():
         if 'total_vectors' in result:
             logger.info(f"  - Total vectors: {result['total_vectors']}")
         logger.info(result['message'])
-        _rag_initialized = True
+        _rag_initialized = (
+            result.get("status") == "success" and result.get("total_vectors", 0) > 0
+        )
     except Exception as e:
         logger.error(f"Error during RAG initialization: {e}")
         _rag_initialized = False
@@ -168,6 +201,8 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 80)
     logger.info("OpenAI Pipeline Backend Starting")
     logger.info("=" * 80)
+
+    setup_traceai(main_module=sys.modules[__name__])
     
     # Start RAG initialization in background (non-blocking)
     import asyncio
@@ -256,9 +291,23 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
         ChatResponse with answer and sources
     """
     try:
-        # Auto-select agent if adaptive mode enabled
+        from .services.openai_rag_init import openai_service
+
+        if openai_service is None:
+            raise HTTPException(
+                status_code=503,
+                detail="RAG system not initialized yet"
+            )
+
+        guardrail_response = get_guardrail_response(request.query)
+        if guardrail_response is not None:
+            logger.info("Answered query via guardrail response before agent selection")
+            if guardrail_response == REFUSAL_MESSAGE:
+                return build_refusal_chat_response(request, guardrail_response)
+            return build_empty_chat_response(request, guardrail_response)
+
         if request.use_adaptive_agent:
-            from services.adaptive_agent_selector import AdaptiveAgentSelector
+            from .services.adaptive_agent_selector import AdaptiveAgentSelector
             agent_config = await AdaptiveAgentSelector.select_agent(request.query)
             logger.info(f"Adaptive Agent Selected: {agent_config['recommendation']} (reason: {agent_config['reason']})")
             request.use_stepback = agent_config['use_stepback']
@@ -266,45 +315,15 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
         
         logger.info(f"Chat endpoint called - Query: {request.query[:50]}...")
         logger.info(f"  Session: {request.session_id}, Top-K: {request.top_k}, CoT: {request.use_cot}, Stepback: {request.use_stepback}")
-        
-        # Optional: Pre-check if question is on-topic (saves API calls for off-topic questions)
-        if request.pre_check_topic:
-            from services.openai_rag_init import openai_service
-            from utils.prompt_guard import is_question_on_topic, get_off_topic_response
-            
-            if openai_service is None:
-                raise HTTPException(
-                    status_code=503,
-                    detail="RAG system not initialized yet"
-                )
-            
-            topic_check = await is_question_on_topic(request.query, openai_service)
-            logger.info(f"Topic check: {topic_check}")
-            
-            if not topic_check.get("on_topic", True):
-                logger.info("Question detected as off-topic, returning standard message")
-                off_topic_response = get_off_topic_response()
-                return ChatResponse(
-                    status="success",
-                    response=off_topic_response["response"],
-                    sources=[],
-                    query=request.query,
-                    timestamp=datetime.now().isoformat(),
-                    reasoning_chain=[],
-                    cot_enabled=False,
-                    stepback_query=""
-                )
-        
-        # Use Stepback Query Decomposition if requested
+
+        agent_type = "standard_rag"
         if request.use_stepback:
-            from services.stepback_agent import StepbackAgent
-            from services.openai_rag_init import openai_service
-            
-            if openai_service is None:
-                raise HTTPException(
-                    status_code=503,
-                    detail="RAG system not initialized yet"
-                )
+            agent_type = "stepback"
+        elif request.use_cot:
+            agent_type = "cot"
+
+        if request.use_stepback:
+            from .services.stepback_agent import StepbackAgent
             
             stepback_agent = StepbackAgent(openai_service)
             result = await stepback_agent.answer_with_stepback(
@@ -313,16 +332,8 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
                 temperature=request.temperature,
                 max_tokens=request.max_tokens
             )
-        # Use Chain of Thought RAG if requested
         elif request.use_cot:
-            from services.cot_rag_service import get_cot_rag_service
-            from services.openai_rag_init import openai_service
-            
-            if openai_service is None:
-                raise HTTPException(
-                    status_code=503,
-                    detail="RAG system not initialized yet"
-                )
+            from .services.cot_rag_service import get_cot_rag_service
             
             cot_service = get_cot_rag_service(openai_service)
             result = await cot_service.get_cot_rag_response(
@@ -332,7 +343,6 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
                 max_tokens=request.max_tokens
             )
         else:
-            # Get standard RAG response (with query rewriting if enabled)
             result = await get_rag_response(
                 query=request.query,
                 top_k=request.top_k,
@@ -340,15 +350,21 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
                 max_tokens=request.max_tokens,
                 use_query_rewriting=request.use_query_rewriting
             )
-        
+
         if result["status"] != "success":
             logger.error(f"RAG response failed: {result['message']}")
             raise HTTPException(
                 status_code=500,
                 detail=result.get("message", "Failed to generate response")
             )
-        
-        # Format sources
+
+        if result.get("refused") or is_refusal_response(result.get("response", "")):
+            logger.info("Returning refusal response without sources")
+            return build_refusal_chat_response(
+                request,
+                result.get("response", REFUSAL_MESSAGE),
+            )
+
         sources = [
             SourceInfo(
                 index=s["index"],
@@ -363,7 +379,6 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
             for s in result.get("sources", [])
         ]
         
-        # Format reasoning chain if CoT was used
         reasoning_chain = []
         if request.use_cot and "reasoning_chain" in result:
             reasoning_chain = [
@@ -376,11 +391,10 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
                 for step in result.get("reasoning_chain", [])
             ]
         
-        # Generate follow-up questions using the FollowUpAgent
         followup_questions: List[str] = []
         try:
-            from services.followup_agent import FollowUpAgent
-            from services.openai_rag_init import openai_service as _oai_svc
+            from .services.followup_agent import FollowUpAgent
+            from .services.openai_rag_init import openai_service as _oai_svc
             if _oai_svc is not None:
                 followup_agent = FollowUpAgent(_oai_svc)
                 followup_questions = await followup_agent.generate_followup_questions(
@@ -391,24 +405,16 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
         except Exception as fu_err:
             logger.warning(f"Follow-up question generation failed (non-fatal): {fu_err}")
 
-        # ── Answer Validation Agent ─────────────────────────────────────
         validation_info: Optional[ValidationInfo] = None
         final_response_text = result["response"]
 
         if request.use_validation:
             try:
-                from services.validation_agent import ValidationAgent
-                from services.openai_rag_init import openai_service as _val_svc
+                from .services.validation_agent import ValidationAgent
+                from .services.openai_rag_init import openai_service as _val_svc
                 if _val_svc is not None:
                     validation_agent = ValidationAgent(_val_svc)
                     retrieved_chunks = result.get("retrieved_chunks", [])
-
-                    # Determine which agent produced the answer (for logging)
-                    agent_type = "standard_rag"
-                    if request.use_stepback:
-                        agent_type = "stepback"
-                    elif request.use_cot:
-                        agent_type = "cot"
 
                     val_result = await validation_agent.validate_and_retry(
                         query=request.query,
@@ -439,6 +445,10 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
                     )
             except Exception as val_err:
                 logger.warning(f"Validation agent failed (non-fatal): {val_err}")
+
+        if is_refusal_response(final_response_text):
+            logger.info("Validation returned refusal response without sources")
+            return build_refusal_chat_response(request, final_response_text)
 
         response = ChatResponse(
             status="success",
@@ -475,7 +485,7 @@ async def analyze_query_endpoint(request: ChatRequest):
         Agent selection recommendation and reasoning
     """
     try:
-        from services.adaptive_agent_selector import AdaptiveAgentSelector
+        from .services.adaptive_agent_selector import AdaptiveAgentSelector
         
         logger.info(f"Analyze query endpoint called - Query: {request.query[:50]}...")
         
@@ -562,8 +572,8 @@ async def stepback_demo_endpoint(request: ChatRequest):
         Detailed stepback analysis
     """
     try:
-        from services.stepback_agent import StepbackAgent
-        from services.openai_rag_init import openai_service
+        from .services.stepback_agent import StepbackAgent
+        from .services.openai_rag_init import openai_service
         
         if openai_service is None:
             raise HTTPException(
@@ -611,8 +621,8 @@ async def followup_endpoint(request: FollowUpRequest) -> FollowUpResponse:
         FollowUpResponse with suggested follow-up questions
     """
     try:
-        from services.followup_agent import FollowUpAgent
-        from services.openai_rag_init import openai_service
+        from .services.followup_agent import FollowUpAgent
+        from .services.openai_rag_init import openai_service
         
         if openai_service is None:
             raise HTTPException(
@@ -683,7 +693,7 @@ async def root():
         },
         "info": {
             "embedding_model": "text-embedding-3-small (1536 dimensions)",
-            "llm_model": "gpt-4o",
+            "llm_model": "gpt-5.4-mini",
             "vector_store": "ChromaDB (persistent disk-based)",
             "pdf_processing": "pdfplumber + PyPDF2",
             "chunking": "400-word chunks"

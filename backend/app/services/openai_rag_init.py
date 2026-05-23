@@ -7,25 +7,69 @@ import os
 import logging
 from typing import List, Dict, Any, Optional
 import chromadb
-from chromadb.config import Settings
-from services.openai_service import OpenAIService
-from utils.openai_utils import (
+from .openai_service import OpenAIService
+from ..utils.openai_utils import (
     process_pdf_file,
     get_pdf_files,
     create_chunk_id,
     load_session_config
 )
-from utils.metadata_manager import get_metadata_manager
-from utils.prompt_guard import STANDARD_RAG_SYSTEM_PROMPT
+from ..utils.metadata_manager import get_metadata_manager
+from ..utils.refusal_utils import REFUSAL_MESSAGE, get_guardrail_response, is_refusal_response
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+STANDARD_RAG_SYSTEM_PROMPT = f"""You are a helpful medical AI assistant specialized in Polycystic Kidney Disease (PKD), ADPKD, and kidney-related disease topics.
+
+If the question is asking anything other than PKD, ADPKD, or any kidney related disease, respond EXACTLY with:
+"{REFUSAL_MESSAGE}"
+
+If the provided context does not contain enough relevant information to answer the question, respond EXACTLY with:
+"{REFUSAL_MESSAGE}"
+
+Provide accurate, evidence-based information based on the provided medical literature.
+
+When answering questions:
+- Be clear, concise, and compassionate
+- Cite evidence from the provided sources when making claims
+- Acknowledge uncertainty when information is limited
+- Remind users to consult their healthcare provider for medical decisions
+- Use professional medical terminology but explain complex concepts"""
+
 # Global ChromaDB client and collection
 openai_chroma_client: Optional[chromadb.Client] = None
 openai_collection: Optional[Any] = None
 openai_service: Optional[OpenAIService] = None
+
+EMPTY_KNOWLEDGE_BASE_MESSAGE = (
+    "I don't have any indexed PKD or ADPKD source documents loaded right now, "
+    "so I can't provide a sourced answer yet."
+)
+
+
+def _resolve_pdf_directory(pdf_directory: str) -> str:
+    """Resolve the configured PDF directory with a fallback to the repo data folder."""
+    app_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    candidates = [pdf_directory]
+
+    if pdf_directory == "papers":
+        candidates.append(os.path.join("data", "papers"))
+
+    existing_directories = []
+    for candidate in candidates:
+        resolved = os.path.join(app_root, candidate)
+        if os.path.exists(resolved):
+            existing_directories.append(resolved)
+            if get_pdf_files(resolved):
+                return resolved
+
+    if existing_directories:
+        return existing_directories[0]
+
+    return os.path.join(app_root, pdf_directory)
 
 
 async def initialize_openai_rag_system(
@@ -51,10 +95,8 @@ async def initialize_openai_rag_system(
     try:
         logger.info("Starting OpenAI RAG system initialization...")
 
-        # Load configuration
         config = load_session_config()
 
-        # Initialize OpenAI service
         global openai_service
         openai_service = OpenAIService(
             embedding_model=config["embedding_model"],
@@ -63,7 +105,6 @@ async def initialize_openai_rag_system(
             retry_delay=config["retry_delay"]
         )
 
-        # Validate connection
         if not openai_service.validate_connection():
             logger.error("Failed to validate OpenAI connection")
             return {
@@ -75,7 +116,6 @@ async def initialize_openai_rag_system(
 
         logger.info("OpenAI connection validated")
 
-        # Initialize ChromaDB (persistent storage)
         chroma_data_path = os.path.join(
             os.path.dirname(__file__),
             "..",
@@ -84,22 +124,29 @@ async def initialize_openai_rag_system(
         os.makedirs(chroma_data_path, exist_ok=True)
 
         logger.info(f"Initializing ChromaDB with path: {chroma_data_path}")
-        # Use PersistentClient for chromadb>=1.3.0
         global openai_chroma_client, openai_collection
         openai_chroma_client = chromadb.PersistentClient(path=chroma_data_path)
 
-        # Get or create collection
+        resolved_pdf_directory = _resolve_pdf_directory(pdf_directory)
+
         try:
             openai_collection = openai_chroma_client.get_collection(name=collection_name)
+            total_vectors = openai_collection.count()
             logger.info(f"Using existing ChromaDB collection: {collection_name}")
-            logger.info(f"Collection contains {openai_collection.count()} vectors")
-            return {
-                "status": "success",
-                "message": f"ChromaDB collection '{collection_name}' already initialized",
-                "documents_processed": 0,
-                "chunks_created": 0,
-                "total_vectors": openai_collection.count()
-            }
+            logger.info(f"Collection contains {total_vectors} vectors")
+            if total_vectors > 0:
+                return {
+                    "status": "success",
+                    "message": f"ChromaDB collection '{collection_name}' already initialized",
+                    "documents_processed": 0,
+                    "chunks_created": 0,
+                    "total_vectors": total_vectors
+                }
+            logger.warning(
+                "Existing ChromaDB collection '%s' is empty; attempting to rebuild from PDFs in %s",
+                collection_name,
+                resolved_pdf_directory,
+            )
         except Exception:
             logger.info(f"Creating new ChromaDB collection: {collection_name}")
             openai_collection = openai_chroma_client.create_collection(
@@ -107,8 +154,7 @@ async def initialize_openai_rag_system(
                 metadata={"hnsw:space": "cosine"}
             )
 
-        # Find and process PDFs
-        pdf_directory = os.path.join(os.path.dirname(__file__), "..", pdf_directory)
+        pdf_directory = resolved_pdf_directory
 
         if not os.path.exists(pdf_directory):
             logger.warning(f"PDF directory not found: {pdf_directory}")
@@ -127,15 +173,14 @@ async def initialize_openai_rag_system(
                 "status": "warning",
                 "message": f"No PDF files found in {pdf_directory}",
                 "documents_processed": 0,
-                "chunks_created": 0
+                "chunks_created": 0,
+                "total_vectors": openai_collection.count() if openai_collection is not None else 0,
             }
         
         logger.info(f"Processing {len(pdf_files)} PDF files...")
         
-        # Initialize metadata manager for enhanced metadata
         metadata_manager = get_metadata_manager()
         
-        # Process all PDFs and collect data
         all_chunks = []
         all_metadatas = []
         all_ids = []
@@ -144,15 +189,13 @@ async def initialize_openai_rag_system(
         for pdf_file in pdf_files:
             try:
                 chunks, basic_metadata = process_pdf_file(pdf_file)
-                
-                # Enhance metadata with metadata manager
                 enhanced_metadata = metadata_manager.extract_enhanced_metadata(
                     pdf_file, basic_metadata
                 )
                 
                 for chunk_idx, chunk in enumerate(chunks):
                     all_chunks.append(chunk)
-                    all_metadatas.append(enhanced_metadata)  # Use enhanced metadata
+                    all_metadatas.append(enhanced_metadata)
                     all_ids.append(create_chunk_id(os.path.basename(pdf_file), chunk_idx))
                 
                 total_chunks += len(chunks)
@@ -171,9 +214,7 @@ async def initialize_openai_rag_system(
                 "chunks_created": 0
             }
         
-        # Generate embeddings in batches
         logger.info(f"Generating OpenAI embeddings for {len(all_chunks)} chunks...")
-        
         embeddings = openai_service.get_embeddings_batch(all_chunks, batch_size=100)
         
         if len(embeddings) != len(all_chunks):
@@ -185,16 +226,18 @@ async def initialize_openai_rag_system(
                 "chunks_created": 0
             }
         
-        # Store in ChromaDB
         logger.info("Storing embeddings and documents in ChromaDB...")
-        
-        openai_collection.add(
-            embeddings=embeddings,
-            documents=all_chunks,
-            metadatas=all_metadatas,
-            ids=all_ids
-        )
-        
+        chroma_batch_size = 5000
+        for i in range(0, len(all_chunks), chroma_batch_size):
+            openai_collection.add(
+                embeddings=embeddings[i:i + chroma_batch_size],
+                documents=all_chunks[i:i + chroma_batch_size],
+                metadatas=all_metadatas[i:i + chroma_batch_size],
+                ids=all_ids[i:i + chroma_batch_size]
+            )
+            logger.info(f"Stored batch {i // chroma_batch_size + 1}: {min(i + chroma_batch_size, len(all_chunks))}/{len(all_chunks)} chunks")
+
+        total_vectors = openai_collection.count()
         logger.info(f"✓ Successfully stored {len(all_chunks)} chunks in ChromaDB")
         
         return {
@@ -202,7 +245,7 @@ async def initialize_openai_rag_system(
             "message": "OpenAI RAG system initialized successfully",
             "documents_processed": len(pdf_files),
             "chunks_created": total_chunks,
-            "total_vectors": openai_collection.count()
+            "total_vectors": total_vectors
         }
         
     except Exception as e:
@@ -240,17 +283,14 @@ async def search_knowledge_base(
         }
     
     try:
-        # Get query embedding
         query_embedding = openai_service.get_embedding(query)
         
-        # Search ChromaDB
         results = openai_collection.query(
             query_embeddings=[query_embedding],
             n_results=top_k,
             include=["documents", "metadatas", "distances"]
         )
         
-        # Format results
         documents = results["documents"][0] if results["documents"] else []
         metadatas = results["metadatas"][0] if results["metadatas"] else []
         distances = results["distances"][0] if results["distances"] else []
@@ -318,18 +358,26 @@ async def get_rag_response(
         }
     
     try:
-        # Step 1: Query rewriting (if enabled)
+        guardrail_response = get_guardrail_response(query)
+        if guardrail_response is not None:
+            logger.info("Standard RAG answered query via guardrail before retrieval")
+            return {
+                "status": "success",
+                "response": guardrail_response,
+                "sources": [],
+                "query": query,
+                "retrieved_chunks": [],
+                "refused": guardrail_response == REFUSAL_MESSAGE,
+            }
+
         search_query = query
         if use_query_rewriting:
-            from services.query_rewriter import get_query_rewriter
+            from .query_rewriter import get_query_rewriter
             query_rewriter = get_query_rewriter(openai_service)
             
-            # Use simple rewriting (fast, no extra LLM call)
-            # For advanced rewriting with variations, use: rewrite_query_advanced()
             search_query = await query_rewriter.rewrite_query_simple(query)
             logger.info(f"Query rewritten: '{query}' → '{search_query}'")
         
-        # Step 2: Search knowledge base with rewritten query
         search_results = await search_knowledge_base(search_query, top_k)
         
         if search_results["status"] != "success":
@@ -342,34 +390,49 @@ async def get_rag_response(
             }
         
         results = search_results["results"]
+        if not results:
+            logger.warning("No retrieved chunks available for query; returning empty-knowledge-base response")
+            return {
+                "status": "success",
+                "response": EMPTY_KNOWLEDGE_BASE_MESSAGE,
+                "sources": [],
+                "query": query,
+                "retrieved_chunks": [],
+                "refused": True,
+            }
         
-        # Format context
         context_parts = []
-        sources = []
-        
+        unique_sources = {}
+
         for i, result in enumerate(results):
             meta = result.get("metadata", {})
-            
-            # Create better source citation
             display_name = meta.get("display_name", f"Source {i+1}")
             citation = meta.get("citation", "Unknown Source")
-            
+            file_key = display_name or meta.get("file_name") or citation or f"chunk_{i}"
+
             context_parts.append(f"[Source {i+1}: {display_name}]\n{result['document']}")
-            
-            sources.append({
-                "index": i + 1,
-                "title": meta.get("title", "Unknown"),
-                "author": meta.get("author", "Unknown"),
-                "year": meta.get("year", "Unknown"),
-                "file": meta.get("file_name", "Unknown"),
-                "citation": citation,
-                "display_name": display_name,
-                "relevance_score": result.get("relevance_score", 0)
-            })
+
+            score = result.get("relevance_score", 0)
+            if file_key not in unique_sources or score > unique_sources[file_key]["relevance_score"]:
+                unique_sources[file_key] = {
+                    "title": meta.get("title", "Unknown"),
+                    "author": meta.get("author", "Unknown"),
+                    "year": meta.get("year", "Unknown"),
+                    "file": file_key,
+                    "citation": citation,
+                    "display_name": display_name,
+                    "relevance_score": score,
+                }
+
+        sources = [
+            {"index": i + 1, **s}
+            for i, s in enumerate(
+                sorted(unique_sources.values(), key=lambda x: -x["relevance_score"])
+            )
+        ]
         
         context = "\n\n".join(context_parts)
         
-        # Get response from OpenAI with guardrails
         response = openai_service.get_chat_completion_with_context(
             context=context,
             user_query=query,
@@ -377,6 +440,17 @@ async def get_rag_response(
             temperature=temperature,
             max_tokens=max_tokens
         )
+
+        if is_refusal_response(response):
+            logger.info("Standard RAG returned refusal response")
+            return {
+                "status": "success",
+                "response": REFUSAL_MESSAGE,
+                "sources": [],
+                "query": query,
+                "retrieved_chunks": [],
+                "refused": True,
+            }
         
         logger.info(f"Generated RAG response ({len(response)} chars, {len(sources)} sources)")
         
@@ -385,7 +459,8 @@ async def get_rag_response(
             "response": response,
             "sources": sources,
             "query": query,
-            "retrieved_chunks": results  # raw chunks for validation agent
+            "retrieved_chunks": results,
+            "refused": False,
         }
         
     except Exception as e:

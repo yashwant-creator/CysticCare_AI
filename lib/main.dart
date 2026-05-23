@@ -654,8 +654,6 @@ class _ChatScreenState extends State<ChatScreen> {
 
   String _formatCheckName(String key) {
     switch (key) {
-      case 'faithfulness':
-        return 'Faithfulness';
       case 'relevance':
         return 'Relevance';
       case 'source_attribution':

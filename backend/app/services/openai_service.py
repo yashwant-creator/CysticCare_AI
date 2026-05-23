@@ -7,7 +7,7 @@ import logging
 import time
 from typing import List, Dict, Any, Optional
 from openai import OpenAI, APIError, RateLimitError, APIConnectionError
-from utils.openai_utils import get_openai_api_key
+from ..utils.openai_utils import get_openai_api_key
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -23,7 +23,7 @@ class OpenAIService:
     def __init__(
         self,
         embedding_model: str = "text-embedding-3-small",
-        chat_model: str = "gpt-4o",
+        chat_model: str = "gpt-5.4-mini",
         max_retries: int = 3,
         retry_delay: int = 2
     ):
@@ -32,7 +32,7 @@ class OpenAIService:
         
         Args:
             embedding_model: Model for embeddings (default: text-embedding-3-small)
-            chat_model: Model for chat completions (default: gpt-4o)
+            chat_model: Model for chat completions (default: gpt-5.4-mini)
             max_retries: Maximum retry attempts for API calls
             retry_delay: Delay in seconds between retries
         """
@@ -164,7 +164,7 @@ class OpenAIService:
                     {"role": "user", "content": user_message}
                 ],
                 temperature=temperature,
-                max_tokens=max_tokens
+                max_completion_tokens=max_tokens
             )
             return response.choices[0].message.content
         

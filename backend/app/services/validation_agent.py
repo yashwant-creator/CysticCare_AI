@@ -2,11 +2,10 @@
 Answer Validation Agent
 Real-time quality gate that validates RAG-generated answers before returning them to users.
 
-Runs 4 parallel checks:
-1. Faithfulness — are claims grounded in retrieved sources?
-2. Relevance — does the answer address the user's question?
-3. Source Attribution — do cited sources match retrieved chunks?
-4. Safety — are medical disclaimers present and guardrails respected?
+Runs 3 parallel checks:
+1. Relevance — does the answer address the user's question?
+2. Source Attribution — do cited sources match retrieved chunks?
+3. Safety — are medical disclaimers present and guardrails respected?
 
 If validation fails, triggers one corrective regeneration attempt.
 """
@@ -19,7 +18,7 @@ from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional
 from statistics import mean
 
-from services.openai_service import OpenAIService
+from .openai_service import OpenAIService
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,24 +27,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Validation prompt templates
 # ---------------------------------------------------------------------------
-
-FAITHFULNESS_SYSTEM_PROMPT = "You are a precise medical fact-checker. You only output valid JSON."
-
-FAITHFULNESS_USER_PROMPT = """You are a fact-checking judge. Given an ANSWER and SOURCE CONTEXT retrieved from a medical knowledge base, determine whether every factual claim in the answer is supported by the provided sources.
-
-CONTEXT:
-{context}
-
-ANSWER:
-{answer}
-
-Instructions:
-1. Identify the key factual claims made in the answer.
-2. For each claim, check if it is directly supported by the source context.
-3. Score from 0.0 (no claims supported) to 1.0 (all claims supported).
-
-Output ONLY valid JSON (no markdown, no extra text):
-{{"supported_claims": ["claim 1", "claim 2"], "unsupported_claims": ["claim 3"], "score": 0.85}}"""
 
 RELEVANCE_SYSTEM_PROMPT = "You are an expert at evaluating answer quality. You only output valid JSON."
 
@@ -63,7 +44,9 @@ Evaluation criteria:
 Output ONLY valid JSON (no markdown, no extra text):
 {{"score": 0.85, "reason": "Brief explanation of the rating"}}"""
 
-CORRECTIVE_SYSTEM_PROMPT = """You are a helpful medical AI assistant specialized in Polycystic Kidney Disease (PKD).
+CORRECTIVE_SYSTEM_PROMPT = """You are a helpful medical AI assistant specialized in PKD, ADPKD, and kidney-disease topics.
+If the question is asking anything other than PKD, ADPKD, or any kidney related disease, then don't answer.
+
 Your previous answer had quality issues that need to be corrected. Generate an improved answer that fixes the identified problems.
 
 When answering:
@@ -81,7 +64,7 @@ When answering:
 @dataclass
 class CheckResult:
     """Result of a single validation check."""
-    name: str            # "faithfulness", "relevance", "source_attribution", "safety"
+    name: str            # "relevance", "source_attribution", "safety"
     passed: bool         # score >= threshold
     score: float         # 0.0 - 1.0
     details: List[str] = field(default_factory=list)   # specific issues found
@@ -118,7 +101,6 @@ class ValidationAgent:
     """
 
     # Thresholds for each check
-    FAITHFULNESS_THRESHOLD = 0.7
     RELEVANCE_THRESHOLD = 0.7
     SOURCE_ATTRIBUTION_THRESHOLD = 0.5
     SAFETY_THRESHOLD = 0.6
@@ -155,9 +137,6 @@ class ValidationAgent:
         logger.info(f"Validating answer from {agent_type} agent...")
 
         # Run the LLM checks concurrently; programmatic checks are instant
-        faithfulness_task = asyncio.to_thread(
-            self._check_faithfulness, answer, retrieved_chunks
-        )
         relevance_task = asyncio.to_thread(
             self._check_relevance, query, answer
         )
@@ -166,11 +145,9 @@ class ValidationAgent:
         source_result = self._check_source_attribution(answer, retrieved_chunks)
         safety_result = self._check_safety(answer)
 
-        faithfulness_result, relevance_result = await asyncio.gather(
-            faithfulness_task, relevance_task
-        )
+        (relevance_result,) = await asyncio.gather(relevance_task)
 
-        checks = [faithfulness_result, relevance_result, source_result, safety_result]
+        checks = [relevance_result, source_result, safety_result]
         scores = [c.score for c in checks]
         all_passed = all(c.passed for c in checks)
 
@@ -246,39 +223,6 @@ class ValidationAgent:
     # ------------------------------------------------------------------
     # Individual checks
     # ------------------------------------------------------------------
-
-    def _check_faithfulness(
-        self, answer: str, chunks: List[Dict[str, Any]]
-    ) -> CheckResult:
-        """Verify every factual claim is grounded in retrieved context (LLM judge)."""
-        context = self._format_chunks_for_prompt(chunks)
-
-        prompt = FAITHFULNESS_USER_PROMPT.format(context=context, answer=answer)
-
-        try:
-            raw = self.openai_service.get_chat_completion(
-                system_prompt=FAITHFULNESS_SYSTEM_PROMPT,
-                user_message=prompt,
-                temperature=0,
-                max_tokens=600,
-            )
-            parsed = self._safe_json_parse(raw)
-            score = float(parsed.get("score", 0.0))
-            unsupported = parsed.get("unsupported_claims", [])
-
-            details = []
-            if unsupported:
-                details = [f"Unsupported claim: {c}" for c in unsupported[:3]]
-
-            return CheckResult(
-                name="faithfulness",
-                passed=score >= self.FAITHFULNESS_THRESHOLD,
-                score=score,
-                details=details,
-            )
-        except Exception as e:
-            logger.warning(f"Faithfulness check failed, passing by default: {e}")
-            return CheckResult(name="faithfulness", passed=True, score=0.75, details=[])
 
     def _check_relevance(self, query: str, answer: str) -> CheckResult:
         """Verify the answer addresses the user's question (LLM judge)."""
@@ -402,8 +346,9 @@ class ValidationAgent:
 
         # Check it's not obviously off-topic (simple heuristic)
         pkd_keywords = [
-            "pkd", "polycystic", "kidney", "renal", "cyst",
-            "tolvaptan", "nephro", "gfr", "egfr",
+            "pkd", "adpkd", "arpkd", "polycystic", "kidney", "renal", "cyst",
+            "tolvaptan", "nephro", "gfr", "egfr", "ckd", "dialysis",
+            "transplant", "creatinine", "proteinuria", "albuminuria", "hematuria",
         ]
         has_pkd_content = any(kw in answer_lower for kw in pkd_keywords)
         if not has_pkd_content:

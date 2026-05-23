@@ -52,10 +52,11 @@ class BackendApi {
       _uri('/chat'),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({
-        'query': message,
+        'query': '$message for ADPKD',
         'session_id': sessionId,
         'use_stepback': useStepback,
         'use_cot': useCoT,
+        'pre_check_topic': true,
       }),
     );
 

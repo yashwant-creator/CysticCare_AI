@@ -4,14 +4,38 @@ Improves RAG accuracy by generating broader, conceptual queries alongside specif
 """
 
 import logging
-from typing import Dict, Any, List, Tuple
-from services.openai_service import OpenAIService
-from services.openai_rag_init import search_knowledge_base
-from utils.prompt_guard import STEPBACK_SYSTEM_PROMPT
+from typing import Dict, Any
+from .openai_service import OpenAIService
+from .openai_rag_init import EMPTY_KNOWLEDGE_BASE_MESSAGE, search_knowledge_base
+from ..utils.refusal_utils import REFUSAL_MESSAGE, get_guardrail_response, is_refusal_response
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+OFF_TOPIC_SENTINEL = "OFF_TOPIC"
+OFF_TOPIC_MESSAGE = REFUSAL_MESSAGE
+
+
+STEPBACK_SYSTEM_PROMPT = f"""You are a helpful medical AI assistant specialized in Polycystic Kidney Disease (PKD), ADPKD, and kidney-related disease topics.
+
+If the question is asking anything other than PKD, ADPKD, or any kidney related disease, respond EXACTLY with:
+"{REFUSAL_MESSAGE}"
+
+If the retrieved context is not sufficient to answer the question, respond EXACTLY with:
+"{REFUSAL_MESSAGE}"
+
+You have been provided with medical literature from two types of searches:
+1. Specific search results directly related to the user's question
+2. Broader conceptual search results providing foundational knowledge
+
+Use both types of information to provide a comprehensive, accurate answer that:
+- Directly addresses the specific question
+- Provides relevant background and context from broader principles
+- Cites evidence from the sources when making claims
+- Acknowledges uncertainty when information is limited
+
+Be clear, concise, and helpful. If the question involves medical decisions, remind users to consult their healthcare provider."""
 
 
 class StepbackAgent:
@@ -47,9 +71,15 @@ class StepbackAgent:
         Returns:
             Broader, conceptual stepback query
         """
-        system_prompt = """You are an expert at identifying underlying medical concepts and principles.
+        system_prompt = """You are an expert at identifying underlying kidney-disease concepts and principles.
 
-Your task: Given a specific medical question about Polycystic Kidney Disease (PKD), generate a broader, more general question that captures the underlying concept or principle.
+If the question is asking anything other than PKD, ADPKD, or any kidney related disease, output EXACTLY:
+OFF_TOPIC
+
+Your task: Given a specific medical question about Polycystic Kidney Disease (PKD), ADPKD, or another kidney-related disease, generate a broader, more general question that captures the underlying concept or principle.
+
+If the original question is NOT related to PKD, kidney disease, renal health, nephrology, or kidney-related medical care, output EXACTLY:
+OFF_TOPIC
 
 The stepback question should:
 - Be more general and conceptual than the original
@@ -83,17 +113,16 @@ Output ONLY the stepback question, nothing else."""
                 max_tokens=200
             )
             
-            stepback_query = stepback_query.strip()
-            
-            # Remove any quotes or extra formatting
-            stepback_query = stepback_query.strip('"\'')
+            stepback_query = stepback_query.strip().strip('"\'')
+            if stepback_query.upper() == OFF_TOPIC_SENTINEL:
+                logger.info("Stepback generation blocked as off-topic")
+                return OFF_TOPIC_SENTINEL
             
             logger.info(f"Generated stepback query: '{stepback_query}'")
             return stepback_query
             
         except Exception as e:
             logger.error(f"Error generating stepback query: {e}")
-            # Fallback: return a generic broader query
             return f"What are the general principles and mechanisms related to {original_query}?"
     
     async def retrieve_with_stepback(
@@ -115,17 +144,25 @@ Output ONLY the stepback question, nothing else."""
             Combined retrieval results with metadata
         """
         try:
-            # Generate stepback query
             stepback_query = await self.generate_stepback_query(original_query)
+            if stepback_query == OFF_TOPIC_SENTINEL:
+                return {
+                    "status": "success",
+                    "original_query": original_query,
+                    "stepback_query": "",
+                    "results": [],
+                    "original_count": 0,
+                    "stepback_count": 0,
+                    "combined_count": 0,
+                    "off_topic": True,
+                }
             
-            # Retrieve for both queries in parallel (conceptually)
             logger.info(f"Retrieving for original query: '{original_query}'")
             original_results = await search_knowledge_base(original_query, top_k)
             
             logger.info(f"Retrieving for stepback query: '{stepback_query}'")
             stepback_results = await search_knowledge_base(stepback_query, top_k)
             
-            # Combine results
             combined = self._combine_results(
                 original_results,
                 stepback_results,
@@ -137,7 +174,6 @@ Output ONLY the stepback question, nothing else."""
             
         except Exception as e:
             logger.error(f"Error in stepback retrieval: {e}")
-            # Fallback to original query only
             return await search_knowledge_base(original_query, top_k)
     
     def _combine_results(
@@ -159,15 +195,12 @@ Output ONLY the stepback question, nothing else."""
         Returns:
             Combined results dictionary
         """
-        # Extract documents
         original_docs = original_results.get("results", [])
         stepback_docs = stepback_results.get("results", [])
         
-        # Deduplicate by document ID/source
         seen_ids = set()
         combined_docs = []
         
-        # Prioritize original query results (more specific)
         for doc in original_docs:
             doc_id = doc.get("metadata", {}).get("file", "")
             if doc_id not in seen_ids:
@@ -175,7 +208,6 @@ Output ONLY the stepback question, nothing else."""
                 doc["retrieval_source"] = "original"
                 combined_docs.append(doc)
         
-        # Add stepback results that aren't duplicates
         for doc in stepback_docs:
             doc_id = doc.get("metadata", {}).get("file", "")
             if doc_id not in seen_ids:
@@ -221,14 +253,50 @@ Output ONLY the stepback question, nothing else."""
             Complete response with answer, sources, and metadata
         """
         try:
-            # Retrieve with stepback
+            guardrail_response = get_guardrail_response(query)
+            if guardrail_response is not None:
+                logger.info("Stepback RAG answered query via guardrail before retrieval")
+                return {
+                    "status": "success",
+                    "response": guardrail_response,
+                    "sources": [],
+                    "query": query,
+                    "stepback_query": "",
+                    "retrieved_chunks": [],
+                    "off_topic": guardrail_response == OFF_TOPIC_MESSAGE,
+                    "refused": guardrail_response == OFF_TOPIC_MESSAGE,
+                }
+
             retrieval_results = await self.retrieve_with_stepback(query, top_k)
+            if retrieval_results.get("off_topic"):
+                return {
+                    "status": "success",
+                    "response": OFF_TOPIC_MESSAGE,
+                    "sources": [],
+                    "query": query,
+                    "stepback_query": "",
+                    "retrieved_chunks": [],
+                    "off_topic": True,
+                    "refused": True,
+                }
+
+            if not retrieval_results.get("results"):
+                logger.warning("Stepback RAG found no retrieved documents; returning empty-knowledge-base response")
+                return {
+                    "status": "success",
+                    "response": EMPTY_KNOWLEDGE_BASE_MESSAGE,
+                    "sources": [],
+                    "query": query,
+                    "stepback_query": retrieval_results.get("stepback_query", ""),
+                    "retrieved_chunks": [],
+                    "off_topic": False,
+                    "refused": True,
+                }
             
-            # Build context from all retrieved documents
             context_parts = []
             for i, doc in enumerate(retrieval_results["results"][:top_k * 2]):
                 metadata = doc.get("metadata", {})
-                content = doc.get("document", "")  # Fixed: use 'document' not 'content'
+                content = doc.get("document", "")
                 source_type = doc.get("retrieval_source", "unknown")
                 display_name = metadata.get("display_name", f"Source {i+1}")
                 
@@ -238,8 +306,6 @@ Output ONLY the stepback question, nothing else."""
                 )
             
             context = "\n".join(context_parts)
-            
-            # Generate answer with guardrails
             system_prompt = STEPBACK_SYSTEM_PROMPT
 
             user_message = f"""USER QUESTION: {query}
@@ -255,21 +321,42 @@ Please provide a comprehensive answer based on the sources above."""
                 temperature=temperature,
                 max_tokens=max_tokens
             )
-            
-            # Format sources for the main API endpoint
-            formatted_sources = []
-            for i, doc in enumerate(retrieval_results["results"][:top_k * 2]):
+
+            if is_refusal_response(answer):
+                logger.info("Stepback answer returned refusal response")
+                return {
+                    "status": "success",
+                    "response": OFF_TOPIC_MESSAGE,
+                    "sources": [],
+                    "query": query,
+                    "stepback_query": "",
+                    "retrieved_chunks": [],
+                    "off_topic": True,
+                    "refused": True,
+                }
+
+            unique_sources = {}
+            for doc in retrieval_results["results"][:top_k * 2]:
                 metadata = doc.get("metadata", {})
-                formatted_sources.append({
-                    "index": i + 1,
-                    "title": metadata.get("title", "Unknown"),
-                    "author": metadata.get("author", "Unknown Author"),
-                    "year": metadata.get("year", "Unknown"),
-                    "file": metadata.get("file_name", "unknown.pdf"),
-                    "citation": metadata.get("citation", ""),
-                    "display_name": metadata.get("display_name", ""),
-                    "relevance_score": doc.get("relevance_score", 0.0)
-                })
+                disp = metadata.get("display_name", "")
+                file_key = disp or metadata.get("file_name") or metadata.get("citation") or f"chunk_{i}"
+                score = doc.get("relevance_score", 0.0)
+                if file_key not in unique_sources or score > unique_sources[file_key]["relevance_score"]:
+                    unique_sources[file_key] = {
+                        "title": metadata.get("title", "Unknown"),
+                        "author": metadata.get("author", "Unknown Author"),
+                        "year": metadata.get("year", "Unknown"),
+                        "file": file_key,
+                        "citation": metadata.get("citation", ""),
+                        "display_name": metadata.get("display_name", ""),
+                        "relevance_score": score,
+                    }
+            formatted_sources = [
+                {"index": i + 1, **s}
+                for i, s in enumerate(
+                    sorted(unique_sources.values(), key=lambda x: -x["relevance_score"])
+                )
+            ]
             
             return {
                 "status": "success",
@@ -277,12 +364,13 @@ Please provide a comprehensive answer based on the sources above."""
                 "original_query": query,
                 "stepback_query": retrieval_results.get("stepback_query", ""),
                 "sources": formatted_sources,
-                "retrieved_chunks": retrieval_results.get("results", []),  # raw chunks for validation agent
+                "retrieved_chunks": retrieval_results.get("results", []),
                 "retrieval_metadata": {
                     "original_count": retrieval_results.get("original_count", 0),
                     "stepback_count": retrieval_results.get("stepback_count", 0),
                     "combined_count": retrieval_results.get("combined_count", 0)
-                }
+                },
+                "refused": False,
             }
             
         except Exception as e:

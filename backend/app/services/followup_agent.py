@@ -7,13 +7,16 @@ and the AI-generated response, using OpenAI ChatGPT.
 import logging
 import json
 from typing import List, Dict, Any
-from services.openai_service import OpenAIService
+from .openai_service import OpenAIService
+from ..utils.refusal_utils import is_refusal_response
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-FOLLOWUP_SYSTEM_PROMPT = """You are a helpful medical AI assistant specializing in Polycystic Kidney Disease (PKD) and related kidney conditions.
+FOLLOWUP_SYSTEM_PROMPT = """You are a helpful medical AI assistant specializing in PKD, ADPKD, and related kidney diseases.
+
+If the question is asking anything other than PKD, ADPKD, or any kidney related disease, then don't answer.
 
 Your task: Given a user's question and the AI-generated response, generate 3 relevant follow-up questions that the user might naturally want to ask next.
 
@@ -72,6 +75,10 @@ class FollowUpAgent:
         )
 
         try:
+            if is_refusal_response(response):
+                logger.info("Skipping follow-up generation for off-topic refusal")
+                return []
+
             raw_output = self.openai_service.get_chat_completion(
                 system_prompt=FOLLOWUP_SYSTEM_PROMPT,
                 user_message=user_message,
@@ -128,9 +135,9 @@ class FollowUpAgent:
 
     @staticmethod
     def _fallback_questions() -> List[str]:
-        """Return generic PKD follow-up questions as a fallback."""
+        """Return generic kidney-disease follow-up questions as a fallback."""
         return [
-            "What lifestyle changes can help manage PKD symptoms?",
-            "How is PKD progression typically monitored?",
-            "Are there any new treatments being researched for PKD?",
+            "How is this kidney condition typically monitored over time?",
+            "What treatment options are commonly considered for this condition?",
+            "Which symptoms or warning signs should prompt medical follow-up?",
         ]

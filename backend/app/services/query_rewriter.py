@@ -5,7 +5,7 @@ Improves retrieval by rephrasing and expanding user queries
 
 import logging
 from typing import List, Dict, Any
-from services.openai_service import OpenAIService
+from .openai_service import OpenAIService
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +94,8 @@ class QueryRewriter:
             
             # Use LLM to generate medical-focused variations
             system_prompt = """You are a medical query expert specializing in Polycystic Kidney Disease (PKD).
+If the question is asking anything other than PKD, ADPKD, or any kidney related disease, then don't answer.
+
 Your task is to rewrite user queries to be more effective for searching medical literature.
 
 Guidelines:

@@ -11,6 +11,7 @@ import pdfplumber
 from PyPDF2 import PdfReader
 from pathlib import Path
 import re
+import tiktoken
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -33,36 +34,63 @@ def get_openai_api_key() -> str:
     return api_key
 
 
+_tokenizer = None
+_MAX_TOKENS = 8000  # safe margin below OpenAI's 8192 hard limit
+
+
+def _get_tokenizer() -> tiktoken.Encoding:
+    global _tokenizer
+    if _tokenizer is None:
+        _tokenizer = tiktoken.get_encoding("cl100k_base")
+    return _tokenizer
+
+
+def _enforce_token_limit(chunk: str) -> List[str]:
+    """Split a chunk that exceeds _MAX_TOKENS into token-safe pieces."""
+    enc = _get_tokenizer()
+    tokens = enc.encode(chunk)
+    if len(tokens) <= _MAX_TOKENS:
+        return [chunk]
+    mid = len(tokens) // 2
+    left = enc.decode(tokens[:mid])
+    right = enc.decode(tokens[mid:])
+    return _enforce_token_limit(left) + _enforce_token_limit(right)
+
+
 def chunk_up_context(text: str, chunk_length: int = 400) -> List[str]:
     """
-    Split text into chunks based on word count
-    
+    Split text into chunks based on word count, then enforce a token limit.
+
     Args:
         text: Text to chunk
         chunk_length: Target words per chunk (default 400)
-        
+
     Returns:
-        List of text chunks
+        List of text chunks, each guaranteed to be under _MAX_TOKENS tokens
     """
     words = text.split()
-    chunks = []
-    current_chunk = []
+    raw_chunks = []
+    current_chunk: List[str] = []
     current_length = 0
-    
+
     for word in words:
         current_chunk.append(word)
         current_length += 1
-        
+
         if current_length >= chunk_length:
-            chunks.append(" ".join(current_chunk))
+            raw_chunks.append(" ".join(current_chunk))
             current_chunk = []
             current_length = 0
-    
-    # Add remaining words
+
     if current_chunk:
-        chunks.append(" ".join(current_chunk))
-    
-    return chunks
+        raw_chunks.append(" ".join(current_chunk))
+
+    # Guarantee every chunk fits within OpenAI's embedding token limit
+    safe_chunks = []
+    for chunk in raw_chunks:
+        safe_chunks.extend(_enforce_token_limit(chunk))
+
+    return safe_chunks
 
 
 def extract_metadata(pdf_path: str) -> Dict[str, Any]:
@@ -265,7 +293,7 @@ def load_session_config() -> Dict[str, Any]:
         "max_retries": int(os.getenv("OPENAI_MAX_RETRIES", "3")),
         "retry_delay": int(os.getenv("OPENAI_RETRY_DELAY", "2")),
         "embedding_model": os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
-        "chat_model": os.getenv("OPENAI_CHAT_MODEL", "gpt-4o"),
+        "chat_model": os.getenv("OPENAI_CHAT_MODEL", "gpt-5.4-mini"),
         "temperature": float(os.getenv("OPENAI_TEMPERATURE", "0.7")),
         "max_tokens": int(os.getenv("OPENAI_MAX_TOKENS", "2000")),
         "top_k_results": int(os.getenv("OPENAI_TOP_K_RESULTS", "5"))

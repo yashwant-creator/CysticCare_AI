@@ -14,8 +14,8 @@ from dotenv import load_dotenv
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from utils.openai_utils import extract_metadata, get_pdf_files
-from utils.metadata_manager import MetadataManager
+from .utils.openai_utils import extract_metadata, get_pdf_files
+from .utils.metadata_manager import MetadataManager
 
 # Load environment variables
 load_dotenv(os.path.join(os.path.dirname(__file__), '../.env'))
