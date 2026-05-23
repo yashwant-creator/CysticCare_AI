@@ -72,4 +72,5 @@ OPENAI_PIPELINE_MIGRATION_PLAN.md
 
 # Research papers - contains copyrighted PDFs
 /backend/app/papers/
+/backend/app/data/papers/
 /backend/app/papers_metadata.json
