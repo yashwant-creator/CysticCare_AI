@@ -326,6 +326,7 @@ async def chat_endpoint(
         hash_session_id,
         normalize_postprocess,
         retrieve,
+        select_agent_mode,
         validation_summary,
     )
     from .services.usage_metrics import RequestUsage
@@ -343,7 +344,9 @@ async def chat_endpoint(
                 return build_empty_chat_response(request, guardrail_response)
 
             service = get_runtime_openai()
-            retrieval = await retrieve(request.query, service, tracker)
+            mode = select_agent_mode(request.query)
+            tracker.selected_mode = mode
+            retrieval = await retrieve(request.query, service, tracker, mode)
             if not retrieval.results:
                 return build_empty_chat_response(
                     request,
@@ -392,8 +395,13 @@ async def chat_endpoint(
                 query=request.query,
                 timestamp=datetime.now().isoformat(),
                 reasoning_chain=[],
-                cot_enabled=False,
-                stepback_query="",
+                cot_enabled=mode == "cot_lite",
+                stepback_query=(
+                    str(retrieval.metadata.get("planned_queries", [""])[0])
+                    if mode == "stepback_lite"
+                    and retrieval.metadata.get("planned_queries")
+                    else ""
+                ),
                 followup_questions=[
                     str(question)
                     for question in postprocess.get("followup_questions", [])
@@ -997,6 +1005,7 @@ async def _generate_bounded_chat_stream_impl(
         hash_session_id,
         normalize_postprocess,
         retrieve,
+        select_agent_mode,
         validation_summary,
     )
     from .services.usage_metrics import RequestUsage
@@ -1018,10 +1027,26 @@ async def _generate_bounded_chat_stream_impl(
                 return
 
             service = get_runtime_openai()
+            mode = select_agent_mode(request.query)
+            tracker.selected_mode = mode
+            if mode == "stepback_lite":
+                yield json.dumps(
+                    {
+                        "type": "status",
+                        "data": "Planning one broader retrieval question...",
+                    }
+                ) + "\n"
+            elif mode == "cot_lite":
+                yield json.dumps(
+                    {
+                        "type": "status",
+                        "data": "Planning a bounded multi-part retrieval...",
+                    }
+                ) + "\n"
             yield json.dumps(
                 {"type": "status", "data": "Searching and ranking medical literature..."}
             ) + "\n"
-            retrieval = await retrieve(request.query, service, tracker)
+            retrieval = await retrieve(request.query, service, tracker, mode)
             if not retrieval.results:
                 yield json.dumps(
                     {

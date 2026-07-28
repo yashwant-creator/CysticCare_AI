@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import hashlib
+import logging
 import os
 import re
 import time
@@ -14,12 +15,15 @@ import tiktoken
 
 from .cross_encoder_reranker import CrossEncoderConfig, CrossEncoderReranker
 from .hybrid_retriever import HybridRetriever
-from .runtime_openai import RuntimeOpenAI
+from .runtime_openai import ProviderUnavailable, RuntimeOpenAI
 from .usage_metrics import RequestUsage
 from ..utils.refusal_utils import INTRO_MESSAGE, REFUSAL_MESSAGE, is_intro_query
 
+logger = logging.getLogger(__name__)
+
 TOP_K = 5
 CONTEXT_TOKEN_BUDGET = 3_000
+RERANK_CANDIDATE_LIMIT = 12
 _rerank_semaphore = asyncio.Semaphore(2)
 
 ANSWER_SYSTEM_PROMPT = """You are CysticCare AI, a warm and practical medical-information assistant specializing in PKD, ADPKD, and kidney disease.
@@ -50,6 +54,37 @@ class RetrievalOutput:
 
 def hash_session_id(session_id: str) -> str:
     return hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
+
+
+def select_agent_mode(query: str) -> str:
+    """Choose a bounded production agent mode without another model call."""
+    normalized = " ".join(query.lower().split())
+    question_count = normalized.count("?")
+    cot_markers = (
+        "compare",
+        "versus",
+        " vs ",
+        "difference between",
+        "pros and cons",
+        "benefits and risks",
+        "first",
+        "then",
+        "multiple",
+    )
+    if question_count > 1 or any(marker in normalized for marker in cot_markers):
+        return "cot_lite"
+    stepback_markers = (
+        "why ",
+        "how does",
+        "what causes",
+        "mechanism",
+        "progression",
+        "risk factors",
+        "long-term",
+    )
+    if any(marker in normalized for marker in stepback_markers):
+        return "stepback_lite"
+    return "standard_rag"
 
 
 def _expand_abbreviations(query: str) -> str:
@@ -135,6 +170,7 @@ async def retrieve(
     query: str,
     service: RuntimeOpenAI,
     tracker: RequestUsage,
+    mode: str = "standard_rag",
 ) -> RetrievalOutput:
     from . import openai_rag_init
 
@@ -142,18 +178,71 @@ async def retrieve(
         raise RuntimeError("Baked vector database is not loaded")
     started = time.perf_counter()
     search_query = _expand_abbreviations(query)
-    query_embedding = await service.embedding(search_query, tracker)
+    tracker.selected_mode = mode
+    planned_queries: List[str] = []
+    if mode != "standard_rag":
+        try:
+            planned_queries = await service.plan_queries(query, mode, tracker)
+        except ProviderUnavailable as error:
+            logger.warning(
+                "Bounded retrieval planner unavailable; falling back to original query (%s)",
+                error.code,
+            )
+    search_queries = [search_query]
+    seen_queries = {search_query.lower()}
+    for planned in planned_queries:
+        expanded = _expand_abbreviations(planned)
+        if expanded.lower() not in seen_queries:
+            search_queries.append(expanded)
+            seen_queries.add(expanded.lower())
+    query_embeddings = await service.embeddings(search_queries, tracker)
     retriever = HybridRetriever()
     if not retriever.initialized:
         raise RuntimeError("Hybrid retriever is not initialized")
-    candidates = await asyncio.to_thread(
-        retriever.hybrid_search,
-        query=search_query,
-        query_embedding=query_embedding,
-        top_k=TOP_K,
-        candidate_pool_limit=40,
-        result_limit=24,
+    result_sets = await asyncio.gather(
+        *[
+            asyncio.to_thread(
+                retriever.hybrid_search,
+                query=retrieval_query,
+                query_embedding=embedding,
+                top_k=TOP_K,
+                candidate_pool_limit=32,
+                result_limit=12,
+            )
+            for retrieval_query, embedding in zip(search_queries, query_embeddings)
+        ]
     )
+    merged: Dict[str, Dict[str, Any]] = {}
+    for results in result_sets:
+        for result in results:
+            metadata = result.get("metadata") or {}
+            key = str(
+                result.get("id")
+                or metadata.get("chunk_id")
+                or metadata.get("paper_id")
+                or hashlib.sha256(
+                    str(result.get("document") or "").encode("utf-8")
+                ).hexdigest()
+            )
+            existing = merged.get(key)
+            if existing is None:
+                item = dict(result)
+                item["_query_hits"] = 1
+                merged[key] = item
+            else:
+                existing["_query_hits"] = int(existing.get("_query_hits", 1)) + 1
+                existing["relevance_score"] = max(
+                    float(existing.get("relevance_score", 0.0)),
+                    float(result.get("relevance_score", 0.0)),
+                )
+    candidates = sorted(
+        merged.values(),
+        key=lambda item: (
+            int(item.get("_query_hits", 1)),
+            float(item.get("relevance_score", 0.0)),
+        ),
+        reverse=True,
+    )[:RERANK_CANDIDATE_LIMIT]
     config = CrossEncoderConfig.from_environment()
     reranker = CrossEncoderReranker(config)
     async with _rerank_semaphore:
@@ -163,6 +252,13 @@ async def retrieve(
             candidates,
             TOP_K,
         )
+    metadata = {
+        **metadata,
+        "agent_mode": mode,
+        "planned_queries": planned_queries,
+        "retrieval_query_count": len(search_queries),
+        "rerank_candidate_count": len(candidates),
+    }
     for item in ranked:
         parent_text = (item.get("metadata") or {}).get("parent_text")
         if parent_text:
@@ -179,10 +275,20 @@ async def retrieve(
 
 
 def answer_user_message(query: str, retrieval: RetrievalOutput) -> str:
+    planned_queries = retrieval.metadata.get("planned_queries", [])
+    planning_context = ""
+    if planned_queries:
+        planning_context = (
+            "BOUNDED ANALYSIS QUESTIONS:\n- "
+            + "\n- ".join(str(item) for item in planned_queries)
+            + "\n\n"
+        )
     return (
         f"QUESTION:\n{query}\n\n"
+        f"{planning_context}"
         f"MEDICAL LITERATURE EXCERPTS:\n{retrieval.context}\n\n"
-        "Provide the answer."
+        "Provide one integrated answer. Do not expose hidden chain-of-thought; "
+        "summarize the useful reasoning and evidence."
     )
 
 

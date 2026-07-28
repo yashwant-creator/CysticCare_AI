@@ -35,6 +35,7 @@ class RequestUsage:
     retrieval_ms: float = 0.0
     time_to_first_token_ms: Optional[float] = None
     disconnected: bool = False
+    selected_mode: str = "standard_rag"
 
     def record(self, usage: OperationUsage) -> None:
         self.operations.append(usage)
@@ -60,7 +61,7 @@ class RequestUsage:
             "session_id_hash": self.session_id,
             "operation_count": len(self.operations),
             "total_tokens": self.total_tokens,
-            "selected_mode": "single_pass_rag",
+            "selected_mode": self.selected_mode,
             "retrieval_ms": round(self.retrieval_ms, 2),
             "time_to_first_token_ms": self.time_to_first_token_ms,
             "completion_ms": round((time.perf_counter() - self.started_at) * 1000, 2),
@@ -70,11 +71,14 @@ class RequestUsage:
             "chat_request_summary %s",
             json.dumps(payload, separators=(",", ":"), sort_keys=True),
         )
-        if len(self.operations) > 3:
+        operation_budget = 3 if self.selected_mode == "standard_rag" else 4
+        if len(self.operations) > operation_budget:
             logger.error(
-                "openai_operation_budget_exceeded request_id=%s count=%s",
+                "openai_operation_budget_exceeded request_id=%s mode=%s count=%s budget=%s",
                 self.request_id,
+                self.selected_mode,
                 len(self.operations),
+                operation_budget,
             )
         if self.total_tokens > 10_000:
             logger.error(

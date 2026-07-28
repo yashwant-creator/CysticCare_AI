@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 from openai import (
     APIConnectionError,
@@ -96,11 +96,20 @@ class RuntimeOpenAI:
                 retries += 1
                 await asyncio.sleep(0.5)
 
-    async def embedding(self, text: str, tracker: RequestUsage) -> list[float]:
+    async def embeddings(
+        self,
+        texts: List[str],
+        tracker: RequestUsage,
+    ) -> List[List[float]]:
+        """Embed one or more retrieval queries in a single provider request."""
+        cleaned = [text.replace("\n", " ") for text in texts if text.strip()]
+        if not cleaned:
+            return []
+
         async def call() -> Any:
             return await self.client.embeddings.create(
                 model=self.embedding_model,
-                input=text.replace("\n", " "),
+                input=cleaned,
             )
 
         response, retries, started = await self._call_with_retry(
@@ -115,7 +124,101 @@ class RuntimeOpenAI:
                 **usage_fields(response.usage),
             )
         )
-        return response.data[0].embedding
+        ordered = sorted(response.data, key=lambda item: item.index)
+        return [item.embedding for item in ordered]
+
+    async def embedding(self, text: str, tracker: RequestUsage) -> list[float]:
+        vectors = await self.embeddings([text], tracker)
+        return vectors[0]
+
+    async def plan_queries(
+        self,
+        query: str,
+        mode: str,
+        tracker: RequestUsage,
+    ) -> List[str]:
+        """Generate a tightly bounded retrieval plan with the helper model."""
+        if mode not in {"stepback_lite", "cot_lite"}:
+            return []
+        maximum = 1 if mode == "stepback_lite" else 3
+        minimum = 1 if mode == "stepback_lite" else 2
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "minItems": minimum,
+                    "maxItems": maximum,
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["questions"],
+        }
+        if mode == "stepback_lite":
+            instruction = (
+                "Write exactly one broader kidney-disease retrieval question that "
+                "captures the clinical principle behind the user's question."
+            )
+        else:
+            instruction = (
+                "Decompose the question into two or three distinct kidney-disease "
+                "retrieval questions. Do not answer them."
+            )
+
+        async def call() -> Any:
+            return await self.client.chat.completions.create(
+                model=self.helper_model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            f"{instruction} Return retrieval questions only. "
+                            "Preserve PKD/ADPKD context and avoid duplication."
+                        ),
+                    },
+                    {"role": "user", "content": query},
+                ],
+                max_completion_tokens=int(
+                    os.getenv("PLANNER_MAX_TOKENS", "180")
+                ),
+                temperature=0,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": f"{mode}_retrieval_plan",
+                        "strict": True,
+                        "schema": schema,
+                    },
+                },
+                store=False,
+                prompt_cache_key="cysticcare-retrieval-plan-v1",
+            )
+
+        operation = f"{mode}_planner"
+        response, retries, started = await self._call_with_retry(
+            operation, self.helper_model, tracker, call
+        )
+        choice = response.choices[0]
+        tracker.record(
+            OperationUsage(
+                operation=operation,
+                model=self.helper_model,
+                latency_ms=round((time.perf_counter() - started) * 1000, 2),
+                retries=retries,
+                finish_reason=choice.finish_reason,
+                **usage_fields(response.usage),
+            )
+        )
+        try:
+            payload = json.loads(choice.message.content or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        raw = payload.get("questions", [])
+        if not isinstance(raw, list):
+            return []
+        questions = [str(item).strip() for item in raw if str(item).strip()]
+        return questions[:maximum]
 
     def _answer_params(
         self,

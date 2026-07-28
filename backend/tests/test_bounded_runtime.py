@@ -17,6 +17,7 @@ from app.services.runtime_pipeline import (
     local_validation,
     normalize_postprocess,
     requires_medical_disclaimer,
+    select_agent_mode,
     validation_summary,
 )
 
@@ -44,6 +45,16 @@ class FakeRuntimeService:
     async def embedding(self, _query, _tracker):
         self.calls.append("embedding")
         return [0.1, 0.2]
+
+    async def embeddings(self, _queries, _tracker):
+        self.calls.append("embedding")
+        return [[0.1, 0.2] for _query in _queries]
+
+    async def plan_queries(self, _query, mode, _tracker):
+        self.calls.append("planner")
+        if mode == "stepback_lite":
+            return ["What broader PKD principle applies?"]
+        return ["What are the benefits?", "What are the risks?"]
 
     async def answer(self, _system, _message, _tracker):
         self.calls.append("answer")
@@ -83,8 +94,16 @@ class BoundedRuntimeTests(unittest.IsolatedAsyncioTestCase):
             context="[Source 1: Smith (2024)]\nEvidence",
         )
 
-        async def fake_retrieve(query, runtime_service, tracker):
-            await runtime_service.embedding(query, tracker)
+        async def fake_retrieve(query, runtime_service, tracker, mode="standard_rag"):
+            planned = []
+            if mode != "standard_rag":
+                planned = await runtime_service.plan_queries(query, mode, tracker)
+            await runtime_service.embeddings([query, *planned], tracker)
+            retrieval.metadata = {
+                **retrieval.metadata,
+                "agent_mode": mode,
+                "planned_queries": planned,
+            }
             return retrieval
 
         request = main_openai.ChatRequest(
@@ -118,6 +137,65 @@ class BoundedRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(response.sources), 1)
         self.assertFalse(response.validation.was_regenerated)
 
+    async def test_cot_lite_is_bounded_to_four_external_operations(self):
+        service = FakeRuntimeService()
+        retrieval = RetrievalOutput(
+            query="Compare treatment benefits and risks",
+            results=[{"id": "chunk-1", "document": "Evidence", "metadata": {}}],
+            sources=[
+                {
+                    "index": 1,
+                    "title": "PKD evidence",
+                    "author": "Smith",
+                    "year": "2024",
+                    "file": "paper.pdf",
+                    "citation": "Smith (2024)",
+                    "display_name": "Smith (2024)",
+                    "relevance_score": 0.9,
+                }
+            ],
+            metadata={"reranker_backend": "medcpt"},
+            context="[Source 1: Smith (2024)]\nEvidence",
+        )
+
+        async def fake_retrieve(query, runtime_service, tracker, mode="standard_rag"):
+            planned = await runtime_service.plan_queries(query, mode, tracker)
+            await runtime_service.embeddings([query, *planned], tracker)
+            retrieval.metadata = {
+                **retrieval.metadata,
+                "agent_mode": mode,
+                "planned_queries": planned,
+            }
+            return retrieval
+
+        request = main_openai.ChatRequest(
+            query="Compare tolvaptan benefits and risks for ADPKD.",
+            session_id="cot-lite-test",
+        )
+        with (
+            patch.dict(os.environ, {"APP_CHECK_ENFORCED": "false"}),
+            patch(
+                "app.services.runtime_openai.get_runtime_openai",
+                return_value=service,
+            ),
+            patch("app.services.runtime_pipeline.retrieve", new=fake_retrieve),
+            patch(
+                "app.services.runtime_pipeline.guardrail_answer",
+                return_value=None,
+            ),
+        ):
+            response = await main_openai.chat_endpoint(request, _http_request())
+
+        self.assertEqual(
+            service.calls,
+            ["planner", "embedding", "answer", "postprocess"],
+        )
+        self.assertTrue(response.cot_enabled)
+        self.assertEqual(
+            response.retrieval_metadata["agent_mode"],
+            "cot_lite",
+        )
+
     async def test_invalid_app_check_cannot_reach_openai(self):
         request = main_openai.ChatRequest(
             query="What is ADPKD?",
@@ -148,6 +226,17 @@ class BoundedRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def test_conversational_followups_are_not_keyword_gated(self):
         self.assertIsNone(guardrail_answer("What symptoms should I watch for?"))
         self.assertIsNone(guardrail_answer("What should I ask my doctor next?"))
+
+    def test_agent_mode_selection_is_local_and_bounded(self):
+        self.assertEqual(select_agent_mode("What is ADPKD?"), "standard_rag")
+        self.assertEqual(
+            select_agent_mode("How does ADPKD progression happen?"),
+            "stepback_lite",
+        )
+        self.assertEqual(
+            select_agent_mode("Compare tolvaptan benefits and risks."),
+            "cot_lite",
+        )
 
     def test_followups_have_a_local_fallback(self):
         postprocess = normalize_postprocess({}, "What treatments are available?")
