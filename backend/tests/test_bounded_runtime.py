@@ -20,6 +20,7 @@ from app.services.runtime_pipeline import (
     select_agent_mode,
     validation_summary,
 )
+from app.services.runtime_openai import RuntimeOpenAI
 
 
 def _http_request(headers=None) -> Request:
@@ -73,6 +74,17 @@ class FakeRuntimeService:
 
 
 class BoundedRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    def test_answer_reasoning_defaults_to_none(self):
+        with patch.dict(
+            os.environ,
+            {"OPENAI_API_KEY": "test-key"},
+            clear=False,
+        ):
+            os.environ.pop("ANSWER_REASONING_EFFORT", None)
+            service = RuntimeOpenAI()
+            params = service._answer_params("system", "user", stream=False)
+        self.assertEqual(params["reasoning_effort"], "none")
+
     async def test_public_flags_cannot_amplify_external_calls(self):
         service = FakeRuntimeService()
         retrieval = RetrievalOutput(

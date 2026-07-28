@@ -236,7 +236,7 @@ class RuntimeOpenAI:
             "max_completion_tokens": int(os.getenv("ANSWER_MAX_TOKENS", "1000")),
             "stream": stream,
             "store": False,
-            "reasoning_effort": os.getenv("ANSWER_REASONING_EFFORT", "low"),
+            "reasoning_effort": os.getenv("ANSWER_REASONING_EFFORT", "none"),
             "prompt_cache_key": "cysticcare-answer-v1",
         }
         if stream:
@@ -263,7 +263,10 @@ class RuntimeOpenAI:
                 **usage_fields(response.usage),
             )
         )
-        return choice.message.content or ""
+        content = choice.message.content or ""
+        if not content.strip():
+            raise ProviderUnavailable("empty_answer")
+        return content
 
     async def stream_answer(
         self,
@@ -281,6 +284,7 @@ class RuntimeOpenAI:
         )
         response_usage: Any = None
         finish_reason: Optional[str] = None
+        emitted_content = False
         try:
             async for chunk in stream:
                 if getattr(chunk, "usage", None) is not None:
@@ -290,12 +294,15 @@ class RuntimeOpenAI:
                     finish_reason = choice.finish_reason or finish_reason
                     content = getattr(choice.delta, "content", None)
                     if content:
+                        emitted_content = True
                         if tracker.time_to_first_token_ms is None:
                             tracker.time_to_first_token_ms = round(
                                 (time.perf_counter() - tracker.started_at) * 1000,
                                 2,
                             )
                         yield content
+            if not emitted_content:
+                raise ProviderUnavailable("empty_answer")
         finally:
             tracker.record(
                 OperationUsage(
