@@ -233,7 +233,7 @@ class ValidationAgent:
                 system_prompt=RELEVANCE_SYSTEM_PROMPT,
                 user_message=prompt,
                 temperature=0,
-                max_tokens=300,
+                max_tokens=1500,  # reasoning model floor: tiny budgets return empty content
             )
             parsed = self._safe_json_parse(raw)
             score = float(parsed.get("score", 0.0))

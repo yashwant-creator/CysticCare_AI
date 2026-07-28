@@ -287,7 +287,7 @@ OFF-TOPIC: brief reason"""
             system_prompt=classifier_prompt,
             user_message=user_message,
             temperature=0.1,  # Very low temperature for consistent classification
-            max_tokens=50
+            max_tokens=1500  # reasoning model floor: tiny budgets return empty content
         )
         
         response = response.strip()

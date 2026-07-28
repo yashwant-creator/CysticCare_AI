@@ -1,0 +1,44 @@
+# .gcloudignore
+# This file specifies files and directories to ignore when uploading to Google Cloud Build.
+
+# Git and OS metadata
+.git/
+.gitignore
+.DS_Store
+
+# Hidden folders and local envs
+.env
+.env.*
+.venv/
+.venv*/
+venv/
+env/
+
+# Python cache and temporary files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local logs
+*.log
+
+# Offline retrieval benchmark outputs (not used by the API runtime)
+app/retrieval_ab_comparison_*.json
+app/retrieval_metrics_*.json
+app/retrieval_trace_*.json
+
+# Large database backups
+app/openai_chroma_data.backup.*/
+app/openai_chroma_data.backup.20260605_143910/
+app/openai_chroma_data.prebuild_backup.*/
+app/openai_chroma_data.recovery*/
+
+# Large PDF documents (not needed for running baked ChromaDB)
+app/papers/
+app/data/papers/
+papers/
+data/papers/

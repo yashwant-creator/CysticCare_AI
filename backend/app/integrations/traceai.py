@@ -1,9 +1,10 @@
 import json
 import logging
 import os
+import sys
 from contextlib import ExitStack, contextmanager
 from functools import wraps
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Callable, Dict, Iterator, Optional
 
 
 logger = logging.getLogger(__name__)
@@ -11,20 +12,36 @@ logger = logging.getLogger(__name__)
 _TRACE_STATE: Dict[str, Any] = {
     "initialized": False,
     "enabled": False,
+    "configured": False,
+    "dependencies_available": False,
     "tracer": None,
     "using_metadata": None,
     "using_session": None,
     "using_user": None,
+    "project_name": "CysticCare AI",
+    "project_type_requested": "OBSERVE",
+    "project_type_applied": None,
+    "project_version_requested": None,
+    "project_version_applied": None,
+    "content_capture_enabled": False,
+    "last_error": None,
 }
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
+_FALSE_VALUES = {"0", "false", "no", "off"}
 
 
 def _parse_bool_env(var_name: str) -> Optional[bool]:
     value = os.getenv(var_name)
     if value is None:
         return None
-    return value.strip().lower() in _TRUE_VALUES
+
+    normalized = value.strip().lower()
+    if normalized in _TRUE_VALUES:
+        return True
+    if normalized in _FALSE_VALUES:
+        return False
+    return None
 
 
 def _should_enable_traceai() -> bool:
@@ -32,6 +49,37 @@ def _should_enable_traceai() -> bool:
     if explicit_flag is not None:
         return explicit_flag
     return bool(os.getenv("FI_API_KEY") and os.getenv("FI_SECRET_KEY"))
+
+
+def _content_capture_enabled() -> bool:
+    # Medical prompts and responses must never leave the provider/runtime logs.
+    # Operation metadata is emitted by usage_metrics.py instead.
+    return False
+
+
+def _refresh_status_from_env() -> None:
+    _TRACE_STATE.update(
+        configured=_should_enable_traceai(),
+        project_name=os.getenv("TRACEAI_PROJECT_NAME", "CysticCare AI"),
+        project_type_requested=os.getenv("TRACEAI_PROJECT_TYPE", "OBSERVE").strip().upper() or "OBSERVE",
+        project_version_requested=os.getenv("TRACEAI_PROJECT_VERSION"),
+        content_capture_enabled=_content_capture_enabled(),
+    )
+
+
+def _disable_traceai(message: Optional[str] = None, *, warn: bool = True) -> bool:
+    _TRACE_STATE.update(
+        enabled=False,
+        tracer=None,
+        using_metadata=None,
+        using_session=None,
+        using_user=None,
+        last_error=message,
+    )
+    if message:
+        log = logger.warning if warn else logger.info
+        log(message)
+    return False
 
 
 def _normalize_attribute_value(value: Any) -> Any:
@@ -49,36 +97,76 @@ def _normalize_attribute_value(value: Any) -> Any:
     return json.dumps(value, default=str)
 
 
+def _captured(value: Any) -> Any:
+    if not _TRACE_STATE.get("content_capture_enabled", True):
+        return None
+    return value
+
+
+def get_traceai_status() -> Dict[str, Any]:
+    _refresh_status_from_env()
+    return {
+        "configured": bool(_TRACE_STATE["configured"]),
+        "initialized": bool(_TRACE_STATE["initialized"]),
+        "enabled": bool(_TRACE_STATE["enabled"]),
+        "available": bool(_TRACE_STATE["dependencies_available"]),
+        "content_capture_enabled": bool(_TRACE_STATE["content_capture_enabled"]),
+        "project": {
+            "name": _TRACE_STATE["project_name"],
+            "type_requested": _TRACE_STATE["project_type_requested"],
+            "type_applied": _TRACE_STATE["project_type_applied"],
+            "version_requested": _TRACE_STATE["project_version_requested"],
+            "version_applied": _TRACE_STATE["project_version_applied"],
+        },
+        "last_error": _TRACE_STATE["last_error"],
+    }
+
+
 def initialize_traceai() -> bool:
     if _TRACE_STATE["initialized"]:
         return _TRACE_STATE["enabled"]
 
     _TRACE_STATE["initialized"] = True
+    _refresh_status_from_env()
 
-    if not _should_enable_traceai():
-        logger.info("traceAI is disabled; install optional traceAI deps and set Future AGI credentials to enable it")
-        return False
+    if not _TRACE_STATE["configured"]:
+        return _disable_traceai(
+            "traceAI is disabled; set TRACEAI_ENABLED=true and Future AGI credentials to enable it",
+            warn=False,
+        )
 
     if not os.getenv("FI_API_KEY") or not os.getenv("FI_SECRET_KEY"):
-        logger.warning("traceAI requested but FI_API_KEY/FI_SECRET_KEY are not configured")
-        return False
+        return _disable_traceai("traceAI requested but FI_API_KEY/FI_SECRET_KEY are not configured")
 
     try:
         from fi_instrumentation import FITracer, register, using_metadata, using_session, using_user
         from fi_instrumentation.fi_types import ProjectType
         from traceai_openai import OpenAIInstrumentor
     except ImportError as exc:
-        logger.warning("traceAI requested but optional Python packages are unavailable: %s", exc)
-        return False
+        _TRACE_STATE["dependencies_available"] = False
+        return _disable_traceai(
+            f"traceAI requested but optional Python packages are unavailable: {exc}"
+        )
 
-    project_name = os.getenv("TRACEAI_PROJECT_NAME", "CysticCare AI")
-    project_version = os.getenv("TRACEAI_PROJECT_VERSION")
-    project_type_name = os.getenv("TRACEAI_PROJECT_TYPE", "OBSERVE").upper()
-    project_type = getattr(ProjectType, project_type_name, ProjectType.OBSERVE)
+    _TRACE_STATE["dependencies_available"] = True
+    project_name = _TRACE_STATE["project_name"]
+    project_version = _TRACE_STATE["project_version_requested"]
+    project_type_name = _TRACE_STATE["project_type_requested"]
+    project_type = getattr(ProjectType, project_type_name, None)
+
+    if project_type is None:
+        return _disable_traceai(
+            f"traceAI requested with invalid TRACEAI_PROJECT_TYPE={project_type_name!r}"
+        )
 
     if project_type_name == "OBSERVE" and project_version:
         logger.info("Ignoring TRACEAI_PROJECT_VERSION for OBSERVE projects")
         project_version = None
+
+    _TRACE_STATE.update(
+        project_type_applied=project_type_name,
+        project_version_applied=project_version,
+    )
 
     register_kwargs = {
         "project_type": project_type,
@@ -92,8 +180,7 @@ def initialize_traceai() -> bool:
         trace_provider = register(**register_kwargs)
         OpenAIInstrumentor().instrument(tracer_provider=trace_provider)
     except Exception as exc:
-        logger.warning("traceAI initialization failed: %s", exc)
-        return False
+        return _disable_traceai(f"traceAI initialization failed: {exc}")
 
     _TRACE_STATE.update(
         enabled=True,
@@ -101,6 +188,7 @@ def initialize_traceai() -> bool:
         using_metadata=using_metadata,
         using_session=using_session,
         using_user=using_user,
+        last_error=None,
     )
 
     logger.info(
@@ -146,14 +234,32 @@ def trace_context(
         yield
         return
 
-    with ExitStack() as stack:
+    stack = ExitStack()
+    try:
         if session_id:
             stack.enter_context(_TRACE_STATE["using_session"](str(session_id)))
         if user_id:
             stack.enter_context(_TRACE_STATE["using_user"](str(user_id)))
         if metadata:
             stack.enter_context(_TRACE_STATE["using_metadata"](metadata))
+    except Exception as exc:
+        _TRACE_STATE["last_error"] = f"traceAI context setup failed: {exc}"
+        logger.debug("traceAI context setup failed", exc_info=True)
+        try:
+            stack.close()
+        except Exception:
+            logger.debug("traceAI context cleanup failed", exc_info=True)
         yield
+        return
+
+    try:
+        yield
+    finally:
+        try:
+            stack.close()
+        except Exception as exc:
+            _TRACE_STATE["last_error"] = f"traceAI context cleanup failed: {exc}"
+            logger.debug("traceAI context cleanup failed", exc_info=True)
 
 
 @contextmanager
@@ -168,32 +274,57 @@ def trace_span(
         yield None
         return
 
-    with _TRACE_STATE["tracer"].start_as_current_span(name, fi_span_kind=kind) as span:
-        if input_value is not None and hasattr(span, "set_input"):
+    span_cm = None
+    span = None
+    try:
+        span_cm = _TRACE_STATE["tracer"].start_as_current_span(name, fi_span_kind=kind)
+        span = span_cm.__enter__()
+    except Exception as exc:
+        _TRACE_STATE["last_error"] = f"traceAI span start failed for {name}: {exc}"
+        logger.debug("traceAI span start failed for %s", name, exc_info=True)
+        yield None
+        return
+
+    exc_info = (None, None, None)
+    try:
+        captured_input = _captured(input_value)
+        if captured_input is not None and hasattr(span, "set_input"):
             try:
-                span.set_input(input_value)
+                span.set_input(captured_input)
             except Exception:
                 logger.debug("Failed to set trace span input", exc_info=True)
 
         set_span_attributes(span, attributes)
-
-        try:
-            yield span
-        except Exception as exc:
-            if hasattr(span, "record_exception"):
+        yield span
+    except Exception as exc:
+        exc_info = sys.exc_info()
+        if hasattr(span, "record_exception"):
+            try:
                 span.record_exception(exc)
-            set_span_attributes(
-                span,
-                {
-                    "error.type": exc.__class__.__name__,
-                    "error.message": str(exc),
-                },
-            )
-            raise
+            except Exception:
+                logger.debug("Failed to record trace span exception", exc_info=True)
+        set_span_attributes(
+            span,
+            {
+                "error.type": exc.__class__.__name__,
+                "error.message": str(exc),
+            },
+        )
+        raise
+    finally:
+        try:
+            if span_cm is not None:
+                span_cm.__exit__(*exc_info)
+        except Exception as exc:
+            _TRACE_STATE["last_error"] = f"traceAI span close failed for {name}: {exc}"
+            logger.debug("traceAI span close failed for %s", name, exc_info=True)
 
 
 def _is_wrapped(callable_obj: Any) -> bool:
-    return bool(getattr(callable_obj, "__traceai_wrapped__", False))
+    return bool(
+        getattr(callable_obj, "__traceai_wrapped__", False)
+        or getattr(getattr(callable_obj, "__func__", None), "__traceai_wrapped__", False)
+    )
 
 
 def _mark_wrapped(callable_obj: Any) -> Any:
@@ -209,6 +340,18 @@ def _infer_agent_type(request: Any) -> str:
     return "standard_rag"
 
 
+def _request_metadata(route: str, request: Any) -> Dict[str, Any]:
+    return {
+        "route": route,
+        "top_k": getattr(request, "top_k", None),
+        "use_adaptive_agent": getattr(request, "use_adaptive_agent", None),
+        "use_cot": getattr(request, "use_cot", None),
+        "use_stepback": getattr(request, "use_stepback", None),
+        "use_validation": getattr(request, "use_validation", None),
+        "use_query_rewriting": getattr(request, "use_query_rewriting", None),
+    }
+
+
 def _replace_fastapi_endpoint(app: Any, original: Any, wrapped: Any) -> None:
     for route in getattr(app, "routes", []):
         if getattr(route, "endpoint", None) is not original:
@@ -217,6 +360,37 @@ def _replace_fastapi_endpoint(app: Any, original: Any, wrapped: Any) -> None:
         route.endpoint = wrapped
         if hasattr(route, "dependant"):
             route.dependant.call = wrapped
+
+
+def _patch_endpoint(main_module: Any, endpoint_name: str, span_name: str, route: str) -> None:
+    original = getattr(main_module, endpoint_name, None)
+    if original is None or _is_wrapped(original):
+        return
+
+    @wraps(original)
+    async def wrapped(request: Any, *args: Any, **kwargs: Any) -> Any:
+        with trace_context(
+            session_id=getattr(request, "session_id", None),
+            metadata=_request_metadata(route, request),
+        ):
+            with trace_span(
+                span_name,
+                kind="agent",
+                input_value=getattr(request, "query", None),
+                attributes={
+                    "http.route": route,
+                    "rag.session_id": getattr(request, "session_id", None),
+                    "rag.top_k": getattr(request, "top_k", None),
+                },
+            ) as span:
+                response = await original(request, *args, **kwargs)
+                set_span_attributes(span, {"rag.status": "success"})
+                return response
+
+    wrapped = _mark_wrapped(wrapped)
+    setattr(main_module, endpoint_name, wrapped)
+    if hasattr(main_module, "app"):
+        _replace_fastapi_endpoint(main_module.app, original, wrapped)
 
 
 def _patch_chat_endpoint(main_module: Any) -> None:
@@ -228,39 +402,21 @@ def _patch_chat_endpoint(main_module: Any) -> None:
     async def wrapped(request: Any) -> Any:
         with trace_context(
             session_id=getattr(request, "session_id", None),
-            metadata={
-                "route": "/chat",
-                "top_k": getattr(request, "top_k", None),
-                "use_adaptive_agent": getattr(request, "use_adaptive_agent", None),
-                "use_cot": getattr(request, "use_cot", None),
-                "use_stepback": getattr(request, "use_stepback", None),
-                "use_validation": getattr(request, "use_validation", None),
-                "use_query_rewriting": getattr(request, "use_query_rewriting", None),
-            },
+            metadata=_request_metadata("/chat", request),
         ):
             with trace_span(
                 "rag.chat_request",
                 kind="agent",
                 input_value=getattr(request, "query", None),
                 attributes={
+                    "http.route": "/chat",
                     "rag.session_id": getattr(request, "session_id", None),
                     "rag.top_k": getattr(request, "top_k", None),
                     "rag.temperature": getattr(request, "temperature", None),
                     "rag.max_tokens": getattr(request, "max_tokens", None),
                 },
             ) as request_span:
-                try:
-                    response = await original(request)
-                except Exception as exc:
-                    status_code = getattr(exc, "status_code", None)
-                    set_span_attributes(
-                        request_span,
-                        {
-                            "rag.status": "error",
-                            "http.status_code": status_code,
-                        },
-                    )
-                    raise
+                response = await original(request)
 
                 response_text = getattr(response, "response", "")
                 sources = getattr(response, "sources", []) or []
@@ -298,6 +454,108 @@ def _patch_chat_endpoint(main_module: Any) -> None:
         _replace_fastapi_endpoint(main_module.app, original, wrapped)
 
 
+def _patch_stream_generator(main_module: Any) -> None:
+    original = getattr(main_module, "generate_chat_stream", None)
+    if original is None or _is_wrapped(original):
+        return
+
+    @wraps(original)
+    async def wrapped(request: Any) -> Any:
+        event_count = 0
+        chunk_count = 0
+        source_count = None
+        status = "success"
+        with trace_context(
+            session_id=getattr(request, "session_id", None),
+            metadata=_request_metadata("/chat-stream", request),
+        ):
+            with trace_span(
+                "rag.chat_stream_request",
+                kind="agent",
+                input_value=getattr(request, "query", None),
+                attributes={
+                    "http.route": "/chat-stream",
+                    "rag.session_id": getattr(request, "session_id", None),
+                    "rag.top_k": getattr(request, "top_k", None),
+                    "rag.temperature": getattr(request, "temperature", None),
+                    "rag.max_tokens": getattr(request, "max_tokens", None),
+                },
+            ) as span:
+                async for event in original(request):
+                    event_count += 1
+                    try:
+                        parsed = json.loads(event)
+                        event_type = parsed.get("type")
+                        if event_type == "chunk":
+                            chunk_count += 1
+                        elif event_type == "sources":
+                            source_count = len(parsed.get("data") or [])
+                        elif event_type == "error":
+                            status = "error"
+                    except Exception:
+                        logger.debug("Could not parse stream event for tracing", exc_info=True)
+                    yield event
+
+                set_span_attributes(
+                    span,
+                    {
+                        "rag.status": status,
+                        "rag.agent_type": _infer_agent_type(request),
+                        "rag.stream_event_count": event_count,
+                        "rag.stream_chunk_count": chunk_count,
+                        "rag.source_count": source_count,
+                    },
+                )
+
+    main_module.generate_chat_stream = _mark_wrapped(wrapped)
+
+
+def _patch_initialize_endpoint(main_module: Any) -> None:
+    _patch_endpoint(main_module, "initialize_endpoint", "rag.initialize_request", "/initialize")
+
+
+def _patch_analyze_query_endpoint(main_module: Any) -> None:
+    _patch_endpoint(main_module, "analyze_query_endpoint", "rag.analyze_query_request", "/analyze-query")
+
+
+def _patch_stepback_demo_endpoint(main_module: Any) -> None:
+    _patch_endpoint(main_module, "stepback_demo_endpoint", "rag.stepback_demo_request", "/stepback-demo")
+
+
+def _patch_followup_endpoint(main_module: Any) -> None:
+    original = getattr(main_module, "followup_endpoint", None)
+    if original is None or _is_wrapped(original):
+        return
+
+    @wraps(original)
+    async def wrapped(request: Any) -> Any:
+        with trace_context(metadata={"route": "/followup"}):
+            with trace_span(
+                "rag.followup_request",
+                kind="agent",
+                input_value=getattr(request, "query", None),
+                attributes={
+                    "http.route": "/followup",
+                    "rag.followup_requested_count": getattr(request, "num_questions", None),
+                },
+            ) as span:
+                response = await original(request)
+                questions = getattr(response, "followup_questions", []) or []
+                set_span_attributes(
+                    span,
+                    {
+                        "rag.status": getattr(response, "status", "success"),
+                        "rag.followup_count": len(questions),
+                    },
+                )
+                return response
+
+    wrapped = _mark_wrapped(wrapped)
+    main_module.followup_endpoint = wrapped
+    if hasattr(main_module, "app"):
+        _replace_fastapi_endpoint(main_module.app, original, wrapped)
+
+
 def _patch_followup_agent(followup_module: Any) -> None:
     cls = getattr(followup_module, "FollowUpAgent", None)
     original = getattr(cls, "generate_followup_questions", None)
@@ -310,6 +568,7 @@ def _patch_followup_agent(followup_module: Any) -> None:
             "rag.followup_questions",
             kind="agent",
             input_value=query,
+            attributes={"rag.followup_requested_count": kwargs.get("num_questions")},
         ) as followup_span:
             questions = await original(self, query, response, *args, **kwargs)
             set_span_attributes(
@@ -326,53 +585,96 @@ def _patch_followup_agent(followup_module: Any) -> None:
 
 def _patch_validation_agent(validation_module: Any) -> None:
     cls = getattr(validation_module, "ValidationAgent", None)
-    original = getattr(cls, "validate_and_retry", None)
-    if cls is None or original is None or _is_wrapped(original):
+    if cls is None:
         return
 
-    @wraps(original)
-    async def wrapped(
-        self: Any,
-        query: str,
-        answer: str,
-        retrieved_chunks: Any,
-        agent_type: str = "standard_rag",
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
-        with trace_span(
-            "rag.validation",
-            kind="agent",
-            input_value=query,
-            attributes={
-                "rag.agent_type": agent_type,
-                "rag.retrieved_chunk_count": len(retrieved_chunks or []),
-            },
-        ) as validation_span:
-            result = await original(
-                self,
-                query,
-                answer,
-                retrieved_chunks,
-                agent_type=agent_type,
-                *args,
-                **kwargs,
-            )
-
-            validation = result.get("validation")
-            validation_data = validation.to_dict() if hasattr(validation, "to_dict") else {}
-            set_span_attributes(
-                validation_span,
-                {
-                    "rag.status": "success",
-                    "validation.passed": validation_data.get("passed"),
-                    "validation.overall_score": validation_data.get("overall_score"),
-                    "validation.was_regenerated": result.get("was_regenerated"),
+    original_validate = getattr(cls, "validate", None)
+    if original_validate is not None and not _is_wrapped(original_validate):
+        @wraps(original_validate)
+        async def validate_wrapper(
+            self: Any,
+            query: str,
+            answer: str,
+            retrieved_chunks: Any,
+            agent_type: str = "standard_rag",
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
+            with trace_span(
+                "rag.validation_checks",
+                kind="agent",
+                input_value=query,
+                attributes={
+                    "rag.agent_type": agent_type,
+                    "rag.retrieved_chunk_count": len(retrieved_chunks or []),
                 },
-            )
-            return result
+            ) as span:
+                result = await original_validate(
+                    self,
+                    query,
+                    answer,
+                    retrieved_chunks,
+                    agent_type,
+                    *args,
+                    **kwargs,
+                )
+                data = result.to_dict() if hasattr(result, "to_dict") else {}
+                set_span_attributes(
+                    span,
+                    {
+                        "validation.passed": data.get("passed"),
+                        "validation.overall_score": data.get("overall_score"),
+                    },
+                )
+                return result
 
-    setattr(cls, "validate_and_retry", _mark_wrapped(wrapped))
+        setattr(cls, "validate", _mark_wrapped(validate_wrapper))
+
+    original_retry = getattr(cls, "validate_and_retry", None)
+    if original_retry is not None and not _is_wrapped(original_retry):
+        @wraps(original_retry)
+        async def retry_wrapper(
+            self: Any,
+            query: str,
+            answer: str,
+            retrieved_chunks: Any,
+            agent_type: str = "standard_rag",
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
+            with trace_span(
+                "rag.validation",
+                kind="agent",
+                input_value=query,
+                attributes={
+                    "rag.agent_type": agent_type,
+                    "rag.retrieved_chunk_count": len(retrieved_chunks or []),
+                },
+            ) as validation_span:
+                result = await original_retry(
+                    self,
+                    query,
+                    answer,
+                    retrieved_chunks,
+                    agent_type,
+                    *args,
+                    **kwargs,
+                )
+
+                validation = result.get("validation")
+                validation_data = validation.to_dict() if hasattr(validation, "to_dict") else {}
+                set_span_attributes(
+                    validation_span,
+                    {
+                        "rag.status": "success",
+                        "validation.passed": validation_data.get("passed"),
+                        "validation.overall_score": validation_data.get("overall_score"),
+                        "validation.was_regenerated": result.get("was_regenerated"),
+                    },
+                )
+                return result
+
+        setattr(cls, "validate_and_retry", _mark_wrapped(retry_wrapper))
 
 
 def _patch_openai_rag_init(openai_rag_init: Any) -> None:
@@ -381,7 +683,10 @@ def _patch_openai_rag_init(openai_rag_init: Any) -> None:
         @wraps(original_initialize)
         async def initialize_wrapper(*args: Any, **kwargs: Any) -> Any:
             pdf_directory = kwargs.get("pdf_directory", args[0] if args else "papers")
-            collection_name = kwargs.get("collection_name", "pkd_knowledge_base_openai")
+            collection_name = kwargs.get(
+                "collection_name",
+                args[1] if len(args) > 1 else "pkd_knowledge_base_openai",
+            )
             with trace_span(
                 "rag.initialize",
                 kind="chain",
@@ -415,6 +720,7 @@ def _patch_openai_rag_init(openai_rag_init: Any) -> None:
                 attributes={"rag.top_k": top_k},
             ) as search_span:
                 result = await original_search(query, top_k, *args, **kwargs)
+                retrieval_metadata = result.get("retrieval_metadata", {})
                 set_span_attributes(
                     search_span,
                     {
@@ -425,6 +731,15 @@ def _patch_openai_rag_init(openai_rag_init: Any) -> None:
                             if result.get("results")
                             else None
                         ),
+                        "rag.reranker_used": retrieval_metadata.get("reranker_used"),
+                        "rag.reranker_backend": retrieval_metadata.get("reranker_backend"),
+                        "rag.reranker_score_type": retrieval_metadata.get("score_type"),
+                        "rag.reranker_confidence": retrieval_metadata.get("confidence"),
+                        "rag.reranker_candidate_count": retrieval_metadata.get("candidate_count"),
+                        "rag.reranker_threshold": retrieval_metadata.get("threshold"),
+                        "rag.reranker_threshold_type": retrieval_metadata.get("threshold_type"),
+                        "rag.reranker_top_raw_score": retrieval_metadata.get("top_raw_score"),
+                        "rag.reranker_latency_ms": retrieval_metadata.get("latency_ms"),
                     },
                 )
                 return result
@@ -461,6 +776,7 @@ def _patch_openai_rag_init(openai_rag_init: Any) -> None:
                     *args,
                     **kwargs,
                 )
+                retrieval_metadata = result.get("retrieval_metadata", {})
                 set_span_attributes(
                     pipeline_span,
                     {
@@ -468,6 +784,11 @@ def _patch_openai_rag_init(openai_rag_init: Any) -> None:
                         "rag.refused": result.get("refused"),
                         "rag.source_count": len(result.get("sources", [])),
                         "rag.retrieved_chunk_count": len(result.get("retrieved_chunks", [])),
+                        "rag.reranker_backend": retrieval_metadata.get("reranker_backend"),
+                        "rag.reranker_score_type": retrieval_metadata.get("score_type"),
+                        "rag.reranker_confidence": retrieval_metadata.get("confidence"),
+                        "rag.reranker_top_score": retrieval_metadata.get("top_score"),
+                        "rag.reranker_top_raw_score": retrieval_metadata.get("top_raw_score"),
                     },
                 )
                 return result
@@ -475,14 +796,184 @@ def _patch_openai_rag_init(openai_rag_init: Any) -> None:
         openai_rag_init.get_rag_response = _mark_wrapped(rag_wrapper)
 
 
+def _patch_adaptive_selector(adaptive_module: Any) -> None:
+    cls = getattr(adaptive_module, "AdaptiveAgentSelector", None)
+    original = getattr(cls, "select_agent", None)
+    if cls is None or original is None or _is_wrapped(original):
+        return
+
+    @wraps(original)
+    async def wrapped(cls_obj: Any, query: str, *args: Any, **kwargs: Any) -> Any:
+        with trace_span("rag.adaptive_agent_selection", kind="agent", input_value=query) as span:
+            result = await original(query, *args, **kwargs)
+            set_span_attributes(
+                span,
+                {
+                    "rag.agent_type": result.get("recommendation"),
+                    "rag.agent_selection_reason": result.get("reason"),
+                    "rag.use_stepback": result.get("use_stepback"),
+                    "rag.use_cot": result.get("use_cot"),
+                },
+            )
+            return result
+
+    setattr(cls, "select_agent", classmethod(_mark_wrapped(wrapped)))
+
+
+def _patch_query_rewriter(query_rewriter_module: Any) -> None:
+    cls = getattr(query_rewriter_module, "QueryRewriter", None)
+    if cls is None:
+        return
+
+    original_simple = getattr(cls, "rewrite_query_simple", None)
+    if original_simple is not None and not _is_wrapped(original_simple):
+        @wraps(original_simple)
+        async def simple_wrapper(self: Any, query: str, *args: Any, **kwargs: Any) -> Any:
+            with trace_span("rag.query_rewrite_simple", kind="chain", input_value=query) as span:
+                rewritten = await original_simple(self, query, *args, **kwargs)
+                set_span_attributes(
+                    span,
+                    {
+                        "rag.status": "success",
+                        "rag.query_changed": rewritten != query,
+                    },
+                )
+                set_span_output(span, rewritten if _TRACE_STATE["content_capture_enabled"] else None)
+                return rewritten
+
+        setattr(cls, "rewrite_query_simple", _mark_wrapped(simple_wrapper))
+
+    original_advanced = getattr(cls, "rewrite_query_advanced", None)
+    if original_advanced is not None and not _is_wrapped(original_advanced):
+        @wraps(original_advanced)
+        async def advanced_wrapper(self: Any, query: str, *args: Any, **kwargs: Any) -> Any:
+            with trace_span("rag.query_rewrite_advanced", kind="chain", input_value=query) as span:
+                result = await original_advanced(self, query, *args, **kwargs)
+                set_span_attributes(
+                    span,
+                    {
+                        "rag.status": "success",
+                        "rag.variation_count": len(result.get("variations", [])),
+                    },
+                )
+                set_span_output(span, result if _TRACE_STATE["content_capture_enabled"] else None)
+                return result
+
+        setattr(cls, "rewrite_query_advanced", _mark_wrapped(advanced_wrapper))
+
+
 def _patch_cot_service(cot_module: Any) -> None:
     cls = getattr(cot_module, "ChainOfThoughtRAG", None)
     if cls is None:
         return
 
-    original = getattr(cls, "get_cot_rag_response", None)
-    if original is not None and not _is_wrapped(original):
-        @wraps(original)
+    original_decompose = getattr(cls, "decompose_query", None)
+    if original_decompose is not None and not _is_wrapped(original_decompose):
+        @wraps(original_decompose)
+        async def decompose_wrapper(self: Any, query: str, *args: Any, **kwargs: Any) -> Any:
+            with trace_span("rag.cot_decompose", kind="chain", input_value=query) as span:
+                result = await original_decompose(self, query, *args, **kwargs)
+                set_span_attributes(
+                    span,
+                    {
+                        "rag.status": "success",
+                        "rag.sub_question_count": len(result or []),
+                        "rag.off_topic": result == ["OFF_TOPIC"],
+                    },
+                )
+                set_span_output(span, result if _TRACE_STATE["content_capture_enabled"] else None)
+                return result
+
+        setattr(cls, "decompose_query", _mark_wrapped(decompose_wrapper))
+
+    original_retrieve = getattr(cls, "retrieve_for_step", None)
+    if original_retrieve is not None and not _is_wrapped(original_retrieve):
+        @wraps(original_retrieve)
+        async def retrieve_wrapper(
+            self: Any,
+            sub_question: str,
+            top_k: int = 5,
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
+            with trace_span(
+                "rag.cot_retrieve_step",
+                kind="retriever",
+                input_value=sub_question,
+                attributes={"rag.top_k": top_k},
+            ) as span:
+                result = await original_retrieve(self, sub_question, top_k=top_k, *args, **kwargs)
+                set_span_attributes(
+                    span,
+                    {
+                        "rag.status": result.get("status"),
+                        "rag.result_count": len(result.get("results", [])),
+                    },
+                )
+                return result
+
+        setattr(cls, "retrieve_for_step", _mark_wrapped(retrieve_wrapper))
+
+    original_reason = getattr(cls, "reason_through_step", None)
+    if original_reason is not None and not _is_wrapped(original_reason):
+        @wraps(original_reason)
+        async def reason_wrapper(
+            self: Any,
+            sub_question: str,
+            context: str,
+            previous_findings: Any,
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
+            with trace_span(
+                "rag.cot_reason_step",
+                kind="llm",
+                input_value=sub_question,
+                attributes={
+                    "rag.previous_finding_count": len(previous_findings or []),
+                    "rag.context_length": len(context or ""),
+                },
+            ) as span:
+                result = await original_reason(
+                    self,
+                    sub_question,
+                    context,
+                    previous_findings,
+                    *args,
+                    **kwargs,
+                )
+                set_span_attributes(span, {"rag.status": "success"})
+                set_span_output(span, result if _TRACE_STATE["content_capture_enabled"] else None)
+                return result
+
+        setattr(cls, "reason_through_step", _mark_wrapped(reason_wrapper))
+
+    original_synthesize = getattr(cls, "synthesize_final_answer", None)
+    if original_synthesize is not None and not _is_wrapped(original_synthesize):
+        @wraps(original_synthesize)
+        async def synthesize_wrapper(
+            self: Any,
+            original_query: str,
+            reasoning_steps: Any,
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
+            with trace_span(
+                "rag.cot_synthesize",
+                kind="llm",
+                input_value=original_query,
+                attributes={"rag.reasoning_step_count": len(reasoning_steps or [])},
+            ) as span:
+                result = await original_synthesize(self, original_query, reasoning_steps, *args, **kwargs)
+                set_span_attributes(span, {"rag.status": "success"})
+                set_span_output(span, result if _TRACE_STATE["content_capture_enabled"] else None)
+                return result
+
+        setattr(cls, "synthesize_final_answer", _mark_wrapped(synthesize_wrapper))
+
+    original_pipeline = getattr(cls, "get_cot_rag_response", None)
+    if original_pipeline is not None and not _is_wrapped(original_pipeline):
+        @wraps(original_pipeline)
         async def pipeline_wrapper(
             self: Any,
             query: str,
@@ -502,7 +993,7 @@ def _patch_cot_service(cot_module: Any) -> None:
                     "rag.max_steps": max_steps,
                 },
             ) as span:
-                result = await original(
+                result = await original_pipeline(
                     self,
                     query,
                     top_k_per_step=top_k_per_step,
@@ -523,6 +1014,7 @@ def _patch_cot_service(cot_module: Any) -> None:
                     },
                 )
                 return result
+
         setattr(cls, "get_cot_rag_response", _mark_wrapped(pipeline_wrapper))
 
 
@@ -531,9 +1023,62 @@ def _patch_stepback_service(stepback_module: Any) -> None:
     if cls is None:
         return
 
-    original = getattr(cls, "answer_with_stepback", None)
-    if original is not None and not _is_wrapped(original):
-        @wraps(original)
+    original_generate = getattr(cls, "generate_stepback_query", None)
+    if original_generate is not None and not _is_wrapped(original_generate):
+        @wraps(original_generate)
+        async def generate_wrapper(self: Any, original_query: str, *args: Any, **kwargs: Any) -> Any:
+            with trace_span(
+                "rag.stepback_generate_query",
+                kind="llm",
+                input_value=original_query,
+            ) as span:
+                result = await original_generate(self, original_query, *args, **kwargs)
+                set_span_attributes(
+                    span,
+                    {
+                        "rag.status": "success",
+                        "rag.off_topic": result == "OFF_TOPIC",
+                    },
+                )
+                set_span_output(span, result if _TRACE_STATE["content_capture_enabled"] else None)
+                return result
+
+        setattr(cls, "generate_stepback_query", _mark_wrapped(generate_wrapper))
+
+    original_retrieve = getattr(cls, "retrieve_with_stepback", None)
+    if original_retrieve is not None and not _is_wrapped(original_retrieve):
+        @wraps(original_retrieve)
+        async def retrieve_wrapper(
+            self: Any,
+            original_query: str,
+            top_k: int = 5,
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
+            with trace_span(
+                "rag.stepback_retrieve",
+                kind="retriever",
+                input_value=original_query,
+                attributes={"rag.top_k": top_k},
+            ) as span:
+                result = await original_retrieve(self, original_query, top_k=top_k, *args, **kwargs)
+                set_span_attributes(
+                    span,
+                    {
+                        "rag.status": result.get("status"),
+                        "rag.off_topic": result.get("off_topic"),
+                        "rag.original_count": result.get("original_count"),
+                        "rag.stepback_count": result.get("stepback_count"),
+                        "rag.combined_count": result.get("combined_count"),
+                    },
+                )
+                return result
+
+        setattr(cls, "retrieve_with_stepback", _mark_wrapped(retrieve_wrapper))
+
+    original_answer = getattr(cls, "answer_with_stepback", None)
+    if original_answer is not None and not _is_wrapped(original_answer):
+        @wraps(original_answer)
         async def answer_wrapper(
             self: Any,
             query: str,
@@ -549,7 +1094,7 @@ def _patch_stepback_service(stepback_module: Any) -> None:
                 input_value=query,
                 attributes={"rag.top_k": top_k},
             ) as span:
-                result = await original(
+                result = await original_answer(
                     self,
                     query,
                     top_k=top_k,
@@ -569,6 +1114,7 @@ def _patch_stepback_service(stepback_module: Any) -> None:
                     },
                 )
                 return result
+
         setattr(cls, "answer_with_stepback", _mark_wrapped(answer_wrapper))
 
 
@@ -576,9 +1122,19 @@ def setup_traceai(main_module: Any = None) -> bool:
     if not initialize_traceai():
         return False
 
-    from ..services import cot_rag_service, followup_agent, openai_rag_init, stepback_agent, validation_agent
+    from ..services import (
+        adaptive_agent_selector,
+        cot_rag_service,
+        followup_agent,
+        openai_rag_init,
+        query_rewriter,
+        stepback_agent,
+        validation_agent,
+    )
 
     _patch_openai_rag_init(openai_rag_init)
+    _patch_adaptive_selector(adaptive_agent_selector)
+    _patch_query_rewriter(query_rewriter)
     _patch_cot_service(cot_rag_service)
     _patch_stepback_service(stepback_agent)
     _patch_followup_agent(followup_agent)
@@ -587,6 +1143,11 @@ def setup_traceai(main_module: Any = None) -> bool:
     if main_module is not None:
         main_module.initialize_openai_rag_system = openai_rag_init.initialize_openai_rag_system
         main_module.get_rag_response = openai_rag_init.get_rag_response
+        _patch_initialize_endpoint(main_module)
         _patch_chat_endpoint(main_module)
+        _patch_stream_generator(main_module)
+        _patch_analyze_query_endpoint(main_module)
+        _patch_stepback_demo_endpoint(main_module)
+        _patch_followup_endpoint(main_module)
 
     return True
