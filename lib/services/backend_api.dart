@@ -8,7 +8,7 @@ class BackendApi {
   /// Defaults to production Cloud Run backend
   static const String _rawBase = String.fromEnvironment(
     'BACKEND_BASE_URL',
-    defaultValue: 'https://cysticcare-backend-798621865464.us-east1.run.app',
+    defaultValue: 'https://cysticcare-backend-5m46tnyvia-ue.a.run.app',
   );
 
   // Normalize base URL (trim whitespace/newlines and trailing slashes)
