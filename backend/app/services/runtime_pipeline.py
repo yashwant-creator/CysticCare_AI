@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 TOP_K = 5
 CONTEXT_TOKEN_BUDGET = 3_000
-RERANK_CANDIDATE_LIMIT = 12
+RERANK_CANDIDATE_LIMIT = int(os.getenv("RAG_RERANK_CANDIDATES", "8"))
 _rerank_semaphore = asyncio.Semaphore(2)
 
 ANSWER_SYSTEM_PROMPT = """You are CysticCare AI, a warm and practical medical-information assistant specializing in PKD, ADPKD, and kidney disease.
@@ -287,8 +287,10 @@ def answer_user_message(query: str, retrieval: RetrievalOutput) -> str:
         f"QUESTION:\n{query}\n\n"
         f"{planning_context}"
         f"MEDICAL LITERATURE EXCERPTS:\n{retrieval.context}\n\n"
-        "Provide one integrated answer. Do not expose hidden chain-of-thought; "
-        "summarize the useful reasoning and evidence."
+        "Provide one integrated answer in roughly 250–450 words, using short "
+        "sections when helpful. Prioritize the most important evidence and finish "
+        "the answer cleanly within the token budget. Do not expose hidden "
+        "chain-of-thought; summarize the useful reasoning and evidence."
     )
 
 

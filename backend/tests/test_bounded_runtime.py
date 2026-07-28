@@ -84,6 +84,7 @@ class BoundedRuntimeTests(unittest.IsolatedAsyncioTestCase):
             service = RuntimeOpenAI()
             params = service._answer_params("system", "user", stream=False)
         self.assertEqual(params["reasoning_effort"], "none")
+        self.assertEqual(params["verbosity"], "low")
 
     async def test_public_flags_cannot_amplify_external_calls(self):
         service = FakeRuntimeService()
