@@ -1,0 +1,24 @@
+flowchart TD
+    A([rebuild_vectordb.py]) --> B[Reset collection + init OpenAIService<br/>chat/vision: gpt-5.5 · embed: text-embedding-3-small]
+    B --> E[Load PDFs from papers/]
+    E --> F{For each PDF}
+
+    F --> G[Extract text + chunk<br/>pdfplumber → ~400-word chunks]
+    G --> P
+
+    F --> I{Image descriptions<br/>enabled?}
+    I -->|no| P
+    I -->|yes| J[Extract images + captions<br/>PyMuPDF: filter, dedupe, pair caption]
+    J --> L[Describe each figure<br/>GPT-5.5 vision + caption hint]
+    L --> M{Informative?}
+    M -->|no logo/banner| SKIP[Skip]
+    M -->|yes| N[Figure chunk<br/>content_type: figure]
+    N --> P
+
+    P[Collect chunks + metadata] --> Q[Embed all chunks<br/>text-embedding-3-small]
+    Q --> R[Store → ChromaDB]
+    R --> F
+    F -->|done| S([Result: documents, chunks, vectors])
+
+    classDef new fill:#d4f7d4,stroke:#2e7d32,stroke-width:2px,color:#000;
+    class I,J,L,M,N,SKIP new;

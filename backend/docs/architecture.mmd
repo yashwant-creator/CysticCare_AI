@@ -1,0 +1,80 @@
+---
+title: CysticCare AI - Architecture (updated 2026-06-08)
+---
+flowchart TB
+    User(["👤 PKD Patient"])
+
+    %% ---------------- Frontend ----------------
+    subgraph FE["🖥️ Frontend — Flutter on Firebase Hosting"]
+        direction LR
+        FE_Chat["Chat · Quick Questions"]
+        FE_Extra["Follow-up chips · Validation badge · Disclaimer"]
+    end
+
+    API["⚡ FastAPI on Cloud Run — POST /chat"]
+
+    %% ---------------- Live request pipeline (the main story) ----------------
+    subgraph PIPE["🔄 Live /chat pipeline — steps run in order"]
+        direction TB
+        S1["1 · Guardrail<br/><i>PKD-scope gate: greet or refuse off-topic</i>"]
+        S2["2 · Adaptive Agent Selector<br/><i>routes the query to one RAG strategy</i>"]
+        S3{"3 · Pick RAG strategy"}
+        S3a["Standard RAG<br/><i>+ query rewriter</i>"]
+        S3b["Chain-of-Thought<br/><i>decompose → reason → synthesize</i>"]
+        S3c["Stepback<br/><i>broaden query → dual retrieval</i>"]
+        S4["4 · Follow-Up Agent<br/><i>suggest 3 next questions</i>"]
+        S5["5 · Validation Agent<br/><i>relevance · sources · safety<br/>regenerate once if it fails</i>"]
+
+        S1 --> S2 --> S3
+        S3 --> S3a & S3b & S3c
+        S3a & S3b & S3c --> S4 --> S5
+    end
+
+    %% ---------------- Shared knowledge + models ----------------
+    KB[("🗄️ ChromaDB knowledge base<br/>vector chunks + paper metadata")]
+
+    subgraph AI["🌐 OpenAI — GPT-5.5"]
+        direction LR
+        AI_Chat["Chat Completions"]
+        AI_Embed["Embeddings<br/>text-embedding-3-small"]
+        AI_Vision["Vision<br/>(figure descriptions)"]
+    end
+
+    %% ---------------- Offline ingestion ----------------
+    subgraph INGEST["📥 Offline ingestion — initialize / rebuild_vectordb"]
+        direction LR
+        I_PDF["PKD research PDFs"] --> I_Proc["Extract text + figures<br/>chunk → embed"]
+    end
+
+    Trace["📊 traceAI / Future AGI<br/><i>route + agent spans<br/>status in /health</i>"]
+
+    %% ---------------- Main request flow ----------------
+    User --> FE
+    FE -->|HTTPS / JSON| API
+    API --> S1
+    S5 ==>|"answer + sources + follow-ups"| API
+    API -.->|response| FE
+
+    %% Retrieval (each strategy reads the same knowledge base)
+    S3a & S3b & S3c -->|retrieve context| KB
+
+    %% All steps reach the model through one shared OpenAI service
+    PIPE ==>|LLM calls| AI
+
+    %% Ingestion populates the knowledge base
+    I_Proc -->|embed + describe figures| AI
+    I_Proc -->|store vectors + metadata| KB
+
+    %% Observability
+    API -.observed by.-> Trace
+
+    %% ---------------- Styling ----------------
+    classDef new fill:#d3f9d8,stroke:#2f9e44,stroke-width:2px,color:#000;
+    classDef store fill:#fff3bf,stroke:#f08c00,stroke-width:2px,color:#000;
+    classDef ext fill:#e5dbff,stroke:#7048e8,stroke-width:2px,color:#000;
+    classDef entry fill:#e7f5ff,stroke:#1971c2,stroke-width:2px,color:#000;
+
+    class S2,S3b,S3c,S4,S5,Trace,AI_Vision,FE_Extra new;
+    class KB store;
+    class AI_Chat,AI_Embed,AI_Vision ext;
+    class API,FE_Chat entry;

@@ -6,7 +6,11 @@ Improves RAG accuracy by generating broader, conceptual queries alongside specif
 import logging
 from typing import Dict, Any
 from .openai_service import OpenAIService
-from .openai_rag_init import EMPTY_KNOWLEDGE_BASE_MESSAGE, search_knowledge_base
+from . import openai_rag_init
+from .openai_rag_init import (
+    EMPTY_KNOWLEDGE_BASE_MESSAGE,
+    INSUFFICIENT_RETRIEVAL_MESSAGE,
+)
 from ..utils.refusal_utils import REFUSAL_MESSAGE, get_guardrail_response, is_refusal_response
 
 # Configure logging
@@ -110,7 +114,7 @@ Output ONLY the stepback question, nothing else."""
                 system_prompt=system_prompt,
                 user_message=user_message,
                 temperature=0.3,  # Lower temperature for consistent, focused stepback
-                max_tokens=200
+                max_tokens=1500  # reasoning model floor: tiny budgets return empty content
             )
             
             stepback_query = stepback_query.strip().strip('"\'')
@@ -158,10 +162,10 @@ Output ONLY the stepback question, nothing else."""
                 }
             
             logger.info(f"Retrieving for original query: '{original_query}'")
-            original_results = await search_knowledge_base(original_query, top_k)
+            original_results = await openai_rag_init.search_knowledge_base(original_query, top_k)
             
             logger.info(f"Retrieving for stepback query: '{stepback_query}'")
-            stepback_results = await search_knowledge_base(stepback_query, top_k)
+            stepback_results = await openai_rag_init.search_knowledge_base(stepback_query, top_k)
             
             combined = self._combine_results(
                 original_results,
@@ -174,7 +178,28 @@ Output ONLY the stepback question, nothing else."""
             
         except Exception as e:
             logger.error(f"Error in stepback retrieval: {e}")
-            return await search_knowledge_base(original_query, top_k)
+            return await openai_rag_init.search_knowledge_base(original_query, top_k)
+
+    @staticmethod
+    def _document_key(doc: Dict[str, Any], source: str, index: int) -> str:
+        """Resolve one stable document identity for cross-query deduplication.
+
+        Older metadata used ``file`` while the current index uses ``paper_id``
+        and ``file_name``. Falling back to an ordinal ensures absent metadata
+        never collapses every candidate into a single result.
+        """
+        metadata = doc.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        value = (
+            metadata.get("paper_id")
+            or metadata.get("parent_document_id")
+            or metadata.get("document_key")
+            or metadata.get("file_name")
+            or metadata.get("file")
+            or doc.get("id")
+        )
+        return str(value) if value else f"{source}:{index}"
     
     def _combine_results(
         self,
@@ -201,25 +226,43 @@ Output ONLY the stepback question, nothing else."""
         seen_ids = set()
         combined_docs = []
         
-        for doc in original_docs:
-            doc_id = doc.get("metadata", {}).get("file", "")
+        for index, doc in enumerate(original_docs):
+            doc_id = self._document_key(doc, "original", index)
             if doc_id not in seen_ids:
                 seen_ids.add(doc_id)
-                doc["retrieval_source"] = "original"
-                combined_docs.append(doc)
+                combined_doc = dict(doc)
+                combined_doc["retrieval_source"] = "original"
+                combined_docs.append(combined_doc)
         
-        for doc in stepback_docs:
-            doc_id = doc.get("metadata", {}).get("file", "")
+        for index, doc in enumerate(stepback_docs):
+            doc_id = self._document_key(doc, "stepback", index)
             if doc_id not in seen_ids:
                 seen_ids.add(doc_id)
-                doc["retrieval_source"] = "stepback"
-                combined_docs.append(doc)
+                combined_doc = dict(doc)
+                combined_doc["retrieval_source"] = "stepback"
+                combined_docs.append(combined_doc)
         
         logger.info(
             f"Combined {len(original_docs)} original + {len(stepback_docs)} stepback "
             f"= {len(combined_docs)} unique documents"
         )
         
+        original_metadata = original_results.get("retrieval_metadata", {})
+        stepback_metadata = stepback_results.get("retrieval_metadata", {})
+        if not isinstance(original_metadata, dict):
+            original_metadata = {}
+        if not isinstance(stepback_metadata, dict):
+            stepback_metadata = {}
+        combined_confidence = (
+            "insufficient"
+            if not combined_docs
+            and (
+                original_metadata.get("confidence") == "insufficient"
+                or stepback_metadata.get("confidence") == "insufficient"
+            )
+            else "context_available" if combined_docs else "unavailable"
+        )
+
         return {
             "status": "success",
             "original_query": original_query,
@@ -227,7 +270,12 @@ Output ONLY the stepback question, nothing else."""
             "results": combined_docs,
             "original_count": len(original_docs),
             "stepback_count": len(stepback_docs),
-            "combined_count": len(combined_docs)
+            "combined_count": len(combined_docs),
+            "retrieval_metadata": {
+                "confidence": combined_confidence,
+                "original": original_metadata,
+                "stepback": stepback_metadata,
+            },
         }
     
     async def answer_with_stepback(
@@ -276,21 +324,28 @@ Output ONLY the stepback question, nothing else."""
                     "query": query,
                     "stepback_query": "",
                     "retrieved_chunks": [],
+                    "retrieval_debug_chunks": retrieval_results.get("results", []),
                     "off_topic": True,
                     "refused": True,
                 }
 
             if not retrieval_results.get("results"):
                 logger.warning("Stepback RAG found no retrieved documents; returning empty-knowledge-base response")
+                retrieval_metadata = retrieval_results.get("retrieval_metadata", {})
                 return {
                     "status": "success",
-                    "response": EMPTY_KNOWLEDGE_BASE_MESSAGE,
+                    "response": (
+                        INSUFFICIENT_RETRIEVAL_MESSAGE
+                        if retrieval_metadata.get("confidence") == "insufficient"
+                        else EMPTY_KNOWLEDGE_BASE_MESSAGE
+                    ),
                     "sources": [],
                     "query": query,
                     "stepback_query": retrieval_results.get("stepback_query", ""),
                     "retrieved_chunks": [],
                     "off_topic": False,
                     "refused": True,
+                    "retrieval_metadata": retrieval_metadata,
                 }
             
             context_parts = []
@@ -331,8 +386,10 @@ Please provide a comprehensive answer based on the sources above."""
                     "query": query,
                     "stepback_query": "",
                     "retrieved_chunks": [],
+                    "retrieval_debug_chunks": retrieval_results.get("results", []),
                     "off_topic": True,
                     "refused": True,
+                    "retrieval_metadata": retrieval_results.get("retrieval_metadata", {}),
                 }
 
             unique_sources = {}
@@ -366,6 +423,7 @@ Please provide a comprehensive answer based on the sources above."""
                 "sources": formatted_sources,
                 "retrieved_chunks": retrieval_results.get("results", []),
                 "retrieval_metadata": {
+                    **retrieval_results.get("retrieval_metadata", {}),
                     "original_count": retrieval_results.get("original_count", 0),
                     "stepback_count": retrieval_results.get("stepback_count", 0),
                     "combined_count": retrieval_results.get("combined_count", 0)

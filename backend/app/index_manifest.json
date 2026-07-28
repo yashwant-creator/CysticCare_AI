@@ -1,0 +1,9 @@
+{
+  "collection_name": "pkd_knowledge_base_openai",
+  "embedding_model": "text-embedding-3-small",
+  "index_build_state": "ready",
+  "index_schema_version": "2",
+  "manifest_version": 1,
+  "tree_sha256": "7429d09ff0634090bec88c1f8f110bf480a8fa59e58c2b360d1515ae326f4d31",
+  "vector_count": 30467
+}

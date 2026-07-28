@@ -1,2 +1,2 @@
-traceAI-openai
-fi-instrumentation-otel
+traceai-openai==0.1.10
+fi-instrumentation-otel==1.0.0

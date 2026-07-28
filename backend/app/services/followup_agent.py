@@ -83,7 +83,7 @@ class FollowUpAgent:
                 system_prompt=FOLLOWUP_SYSTEM_PROMPT,
                 user_message=user_message,
                 temperature=temperature,
-                max_tokens=500,
+                max_tokens=2000,  # reasoning model floor: tiny budgets return empty content
             )
 
             # Parse JSON array from the response

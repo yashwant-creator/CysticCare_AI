@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'services/backend_api.dart';
 import 'utils/close_app.dart';
 
@@ -29,10 +30,10 @@ class CysticCareApp extends StatelessWidget {
 }
 
 class ChatMessage {
-  final String content;
+  String content;
   final bool isUser;
   final DateTime timestamp;
-  final ValidationInfo? validation;
+  ValidationInfo? validation;
 
   ChatMessage({
     required this.content,
@@ -56,6 +57,9 @@ class _ChatScreenState extends State<ChatScreen> {
   final BackendApi _api = BackendApi();
   bool _isSessionInitialized = false;
   bool _isLoading = false;
+  bool _isRequestActive = false;
+  int _requestEpoch = 0;
+  String? _currentStatus;
   String? _sessionId;
   String? _error;
   bool _disclaimerAccepted = false;
@@ -150,7 +154,11 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  void _addMessage(String content, {required bool isUser, ValidationInfo? validation}) {
+  void _addMessage(
+    String content, {
+    required bool isUser,
+    ValidationInfo? validation,
+  }) {
     setState(() {
       _messages.add(
         ChatMessage(
@@ -178,6 +186,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _sendMessage(String text) async {
     if (text.trim().isEmpty) return;
+    if (_isRequestActive) return;
     if (!_isSessionInitialized || _sessionId == null) {
       setState(() => _error = 'Session is not initialized yet.');
       return;
@@ -188,47 +197,152 @@ class _ChatScreenState extends State<ChatScreen> {
 
     setState(() {
       _isLoading = true;
+      _isRequestActive = true;
+      _currentStatus = "Connecting...";
       _error = null;
       _followupQuestions = [];
     });
 
-    try {
-      final reply = await _api.chat(sessionId: _sessionId!, message: text);
-      setState(() {
-        _isLoading = false;
-        _followupQuestions = reply.followupQuestions;
-      });
+    ChatMessage? activeBotMessage;
+    List<String> sourceTitles = [];
+    List<String> sourceCitations = [];
 
-      String response = reply.response;
-      // Append sources/citations if available
-      if (reply.sourceCitations.isNotEmpty) {
-        response = '$response\n\n━━━━━━━━━━━━━━━━\n📚 Sources:\n\n';
-        for (int i = 0; i < reply.sourceCitations.length; i++) {
-          final authorYear = reply.sourceCitations[i];
-          final title = i < reply.sourceTitles.length ? reply.sourceTitles[i] : '';
-          
-          // Clean, professional format: [1] Author (Year): Title
-          response += '[${i + 1}] $authorYear';
-          if (title.isNotEmpty && title != 'Unknown') {
-            response += ':\n    "$title"';
-          }
-          response += '\n\n';
+    final requestEpoch = ++_requestEpoch;
+    try {
+      final stream = _api.chatStream(sessionId: _sessionId!, message: text);
+
+      await for (final event in stream) {
+        if (requestEpoch != _requestEpoch) break;
+        switch (event.type) {
+          case ChatStreamEventType.status:
+            setState(() {
+              _currentStatus = event.status;
+              // Keep typing indicator visible for post-generation processes
+              if (activeBotMessage != null) {
+                _isLoading = true;
+              }
+            });
+            _scrollToBottom();
+            break;
+
+          case ChatStreamEventType.sources:
+            if (event.sourceTitles != null) {
+              sourceTitles = event.sourceTitles!;
+            }
+            if (event.sourceCitations != null) {
+              sourceCitations = event.sourceCitations!;
+            }
+            break;
+
+          case ChatStreamEventType.chunk:
+            if (event.chunk == null) break;
+            if (activeBotMessage == null) {
+              activeBotMessage = ChatMessage(
+                content: event.chunk!,
+                isUser: false,
+                timestamp: DateTime.now(),
+              );
+              setState(() {
+                _isLoading =
+                    false; // Hide typing indicator and let bubble render
+                _messages.add(activeBotMessage!);
+              });
+            } else {
+              setState(() {
+                activeBotMessage!.content += event.chunk!;
+              });
+            }
+            _scrollToBottom();
+            break;
+
+          case ChatStreamEventType.followup:
+            setState(() {
+              if (event.followupQuestions != null) {
+                _followupQuestions = event.followupQuestions!;
+              }
+            });
+            break;
+
+          case ChatStreamEventType.validation:
+            if (event.validation == null) break;
+            setState(() {
+              if (activeBotMessage != null) {
+                if (event.validationText != null) {
+                  // Handle corrective regeneration: smooth swap/animation
+                  activeBotMessage.content = event.validationText!;
+                }
+                activeBotMessage.validation = event.validation;
+              }
+            });
+            _scrollToBottom();
+            break;
+
+          case ChatStreamEventType.error:
+            if (event.error != null) {
+              setState(() {
+                _error = 'Stream Error: ${event.error}';
+              });
+            }
+            break;
+
+          case ChatStreamEventType.done:
+            break;
         }
       }
-      _addMessage(response, isUser: false, validation: reply.validation);
-    } catch (e) {
+
+      if (requestEpoch != _requestEpoch) return;
+
+      // After stream successfully completes, append any buffered sources
+      if (activeBotMessage != null && sourceCitations.isNotEmpty) {
+        String sourcesBlock = '\n\n━━━━━━━━━━━━━━━━\n📚 Sources:\n\n';
+        for (int i = 0; i < sourceCitations.length; i++) {
+          final authorYear = sourceCitations[i];
+          final title = i < sourceTitles.length ? sourceTitles[i] : '';
+
+          sourcesBlock += '[${i + 1}] $authorYear';
+          if (title.isNotEmpty && title != 'Unknown') {
+            sourcesBlock += ':\n    "$title"';
+          }
+          sourcesBlock += '\n\n';
+        }
+        setState(() {
+          activeBotMessage!.content += sourcesBlock;
+        });
+        _scrollToBottom();
+      }
+
       setState(() {
         _isLoading = false;
-        _error = 'Failed to send message: $e';
+        _currentStatus = null;
       });
+    } catch (e) {
+      if (mounted && requestEpoch == _requestEpoch) {
+        setState(() {
+          _isLoading = false;
+          _currentStatus = null;
+          _error = 'Failed to stream response: $e';
+        });
+      }
+    } finally {
+      if (mounted && requestEpoch == _requestEpoch) {
+        setState(() {
+          _isRequestActive = false;
+          _isLoading = false;
+          _currentStatus = null;
+        });
+      }
     }
   }
 
   // Removed mock response generator; responses now come from backend API.
 
   void _clearChat() {
+    _requestEpoch++;
     setState(() {
       _messages.clear();
+      _isLoading = false;
+      _isRequestActive = false;
+      _currentStatus = null;
     });
     _addMessage(
       "Chat history cleared. How can I help you with PKD-related questions?",
@@ -237,10 +351,14 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _resetSession() {
+    _requestEpoch++;
     setState(() {
       _messages.clear();
       _isSessionInitialized = false;
       _sessionId = null;
+      _isLoading = false;
+      _isRequestActive = false;
+      _currentStatus = null;
     });
     _initializeSession();
   }
@@ -332,8 +450,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 child: Text('Please accept the disclaimer to continue.'),
               ),
             )
-          else
-          if (!_isSessionInitialized && _isLoading)
+          else if (!_isSessionInitialized && _isLoading)
             const Expanded(
               child: Center(
                 child: Column(
@@ -348,8 +465,8 @@ class _ChatScreenState extends State<ChatScreen> {
             )
           else
             Expanded(child: _buildChatArea()),
-        if (_followupQuestions.isNotEmpty && !_isLoading)
-          _buildFollowUpSuggestions(),
+          if (_followupQuestions.isNotEmpty && !_isLoading)
+            _buildFollowUpSuggestions(),
         ],
       ),
     );
@@ -477,13 +594,66 @@ class _ChatScreenState extends State<ChatScreen> {
                         : Colors.grey[100],
                     borderRadius: BorderRadius.circular(16),
                   ),
-                  child: Text(
-                    message.content,
-                    style: TextStyle(
-                      color: message.isUser ? Colors.white : Colors.black87,
-                      fontSize: 16,
-                    ),
-                  ),
+                  child: message.isUser
+                      ? Text(
+                          message.content,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            height: 1.45,
+                          ),
+                        )
+                      : MarkdownBody(
+                          data: message.content,
+                          selectable: true,
+                          styleSheet:
+                              MarkdownStyleSheet.fromTheme(
+                                Theme.of(context),
+                              ).copyWith(
+                                p: const TextStyle(
+                                  color: Colors.black87,
+                                  fontSize: 16,
+                                  height: 1.5,
+                                ),
+                                strong: const TextStyle(
+                                  color: Colors.black87,
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w700,
+                                  height: 1.5,
+                                ),
+                                em: const TextStyle(
+                                  color: Colors.black87,
+                                  fontSize: 16,
+                                  fontStyle: FontStyle.italic,
+                                  height: 1.5,
+                                ),
+                                h1: const TextStyle(
+                                  color: Colors.black87,
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.w700,
+                                  height: 1.35,
+                                ),
+                                h2: const TextStyle(
+                                  color: Colors.black87,
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.w700,
+                                  height: 1.35,
+                                ),
+                                h3: const TextStyle(
+                                  color: Colors.black87,
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w700,
+                                  height: 1.4,
+                                ),
+                                listBullet: const TextStyle(
+                                  color: Colors.black87,
+                                  fontSize: 16,
+                                  height: 1.5,
+                                ),
+                                blockSpacing: 12,
+                                listIndent: 22,
+                              ),
+                        ),
                 ),
                 if (!message.isUser && message.validation != null)
                   _buildValidationBadge(message.validation!),
@@ -573,7 +743,9 @@ class _ChatScreenState extends State<ChatScreen> {
               Row(
                 children: [
                   Icon(
-                    validation.passed ? Icons.verified : Icons.warning_amber_rounded,
+                    validation.passed
+                        ? Icons.verified
+                        : Icons.warning_amber_rounded,
                     color: validation.passed
                         ? const Color(0xFF4CAF50)
                         : const Color(0xFFFFA726),
@@ -594,7 +766,11 @@ class _ChatScreenState extends State<ChatScreen> {
                   padding: EdgeInsets.only(top: 8),
                   child: Text(
                     'This answer was automatically improved by the validation agent.',
-                    style: TextStyle(fontSize: 13, fontStyle: FontStyle.italic, color: Colors.black54),
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontStyle: FontStyle.italic,
+                      color: Colors.black54,
+                    ),
                   ),
                 ),
               const SizedBox(height: 16),
@@ -609,7 +785,9 @@ class _ChatScreenState extends State<ChatScreen> {
                       Icon(
                         check.passed ? Icons.check_circle : Icons.cancel,
                         size: 18,
-                        color: check.passed ? const Color(0xFF4CAF50) : const Color(0xFFEF5350),
+                        color: check.passed
+                            ? const Color(0xFF4CAF50)
+                            : const Color(0xFFEF5350),
                       ),
                       const SizedBox(width: 8),
                       Expanded(
@@ -623,7 +801,9 @@ class _ChatScreenState extends State<ChatScreen> {
                         style: TextStyle(
                           fontSize: 14,
                           fontWeight: FontWeight.w600,
-                          color: check.passed ? const Color(0xFF4CAF50) : const Color(0xFFEF5350),
+                          color: check.passed
+                              ? const Color(0xFF4CAF50)
+                              : const Color(0xFFEF5350),
                         ),
                       ),
                     ],
@@ -634,13 +814,23 @@ class _ChatScreenState extends State<ChatScreen> {
                 const SizedBox(height: 12),
                 const Text(
                   'Warnings:',
-                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.black54),
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.black54,
+                  ),
                 ),
                 const SizedBox(height: 4),
                 ...validation.warnings.map(
                   (w) => Padding(
                     padding: const EdgeInsets.only(left: 8, top: 2),
-                    child: Text('• $w', style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                    child: Text(
+                      '• $w',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.black54,
+                      ),
+                    ),
                   ),
                 ),
               ],
@@ -701,9 +891,9 @@ class _ChatScreenState extends State<ChatScreen> {
               color: Colors.grey[100],
               borderRadius: BorderRadius.circular(16),
             ),
-            child: const Text(
-              'CysticCare AI is thinking...',
-              style: TextStyle(
+            child: Text(
+              _currentStatus ?? 'CysticCare AI is thinking...',
+              style: const TextStyle(
                 color: Colors.black54,
                 fontStyle: FontStyle.italic,
               ),
@@ -720,9 +910,7 @@ class _ChatScreenState extends State<ChatScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
       decoration: BoxDecoration(
         color: Colors.grey[50],
-        border: Border(
-          top: BorderSide(color: Colors.grey[200]!),
-        ),
+        border: Border(top: BorderSide(color: Colors.grey[200]!)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -741,10 +929,7 @@ class _ChatScreenState extends State<ChatScreen> {
             runSpacing: 8,
             children: _followupQuestions.map((question) {
               return ActionChip(
-                label: Text(
-                  question,
-                  style: const TextStyle(fontSize: 13),
-                ),
+                label: Text(question, style: const TextStyle(fontSize: 13)),
                 backgroundColor: Colors.white,
                 side: const BorderSide(color: Color(0xFF2E86AB)),
                 labelStyle: const TextStyle(color: Color(0xFF2E86AB)),
@@ -794,12 +979,14 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
               maxLines: null,
               textInputAction: TextInputAction.send,
-              onSubmitted: _sendMessage,
+              onSubmitted: _isRequestActive ? null : _sendMessage,
             ),
           ),
           const SizedBox(width: 8),
           FloatingActionButton(
-            onPressed: () => _sendMessage(_textController.text),
+            onPressed: _isRequestActive
+                ? null
+                : () => _sendMessage(_textController.text),
             backgroundColor: const Color(0xFF2E86AB),
             child: const Icon(Icons.send, color: Colors.white),
           ),
@@ -910,6 +1097,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    _requestEpoch++;
     _textController.dispose();
     _scrollController.dispose();
     super.dispose();

@@ -6,7 +6,11 @@ Implements multi-step reasoning for complex medical queries
 import logging
 from typing import Dict, Any, List
 from .openai_service import OpenAIService
-from .openai_rag_init import EMPTY_KNOWLEDGE_BASE_MESSAGE, search_knowledge_base
+from . import openai_rag_init
+from .openai_rag_init import (
+    EMPTY_KNOWLEDGE_BASE_MESSAGE,
+    INSUFFICIENT_RETRIEVAL_MESSAGE,
+)
 from ..utils.refusal_utils import REFUSAL_MESSAGE, get_guardrail_response, is_refusal_response
 
 # Configure logging
@@ -91,7 +95,7 @@ Output:
                 system_prompt=system_prompt,
                 user_message=user_message,
                 temperature=0.3,  # Lower temperature for more focused decomposition
-                max_tokens=500
+                max_tokens=2000  # reasoning model floor: tiny budgets return empty content
             )
 
             if response.strip().strip('"\'').upper() == OFF_TOPIC_SENTINEL:
@@ -129,7 +133,7 @@ Output:
             Dictionary with retrieved documents and metadata
         """
         try:
-            search_results = await search_knowledge_base(sub_question, top_k)
+            search_results = await openai_rag_init.search_knowledge_base(sub_question, top_k)
             return search_results
         except Exception as e:
             logger.error(f"Error retrieving for sub-question: {e}")
@@ -188,7 +192,7 @@ Your reasoning:"""
                 system_prompt=system_prompt,
                 user_message=user_message,
                 temperature=0.5,
-                max_tokens=400
+                max_tokens=2000  # reasoning model floor: tiny budgets return empty content
             )
             
             return response.strip()
@@ -307,11 +311,20 @@ Based on this step-by-step analysis, provide a comprehensive answer:"""
             all_sources = []
             all_sources_raw = []
             previous_findings = []
+            retrieval_steps = []
             
             for i, sub_question in enumerate(sub_questions):
                 logger.info(f"Processing step {i+1}: {sub_question[:80]}...")
                 
                 search_results = await self.retrieve_for_step(sub_question, top_k_per_step)
+                retrieval_metadata = search_results.get("retrieval_metadata", {})
+                retrieval_steps.append({
+                    "step": i + 1,
+                    "result_count": len(search_results.get("results", [])),
+                    "confidence": retrieval_metadata.get("confidence"),
+                    "reranker_used": retrieval_metadata.get("reranker_used"),
+                    "candidate_count": retrieval_metadata.get("candidate_count"),
+                })
                 
                 if search_results["status"] != "success" or not search_results["results"]:
                     logger.warning(f"No results for step {i+1}")
@@ -355,15 +368,28 @@ Based on this step-by-step analysis, provide a comprehensive answer:"""
             
             if not reasoning_steps:
                 logger.warning("CoT RAG found no retrieved documents across reasoning steps")
+                retrieval_confidence = (
+                    "insufficient"
+                    if any(step.get("confidence") == "insufficient" for step in retrieval_steps)
+                    else "unavailable"
+                )
                 return {
                     "status": "success",
-                    "response": EMPTY_KNOWLEDGE_BASE_MESSAGE,
+                    "response": (
+                        INSUFFICIENT_RETRIEVAL_MESSAGE
+                        if retrieval_confidence == "insufficient"
+                        else EMPTY_KNOWLEDGE_BASE_MESSAGE
+                    ),
                     "query": query,
                     "reasoning_chain": [],
                     "sources": [],
                     "cot_enabled": False,
                     "retrieved_chunks": [],
                     "refused": True,
+                    "retrieval_metadata": {
+                        "confidence": retrieval_confidence,
+                        "steps": retrieval_steps,
+                    },
                 }
             
             logger.info("Synthesizing final answer...")
@@ -384,8 +410,13 @@ Based on this step-by-step analysis, provide a comprehensive answer:"""
                     "reasoning_chain": [],
                     "cot_enabled": False,
                     "retrieved_chunks": [],
+                    "retrieval_debug_chunks": all_sources_raw,
                     "off_topic": True,
                     "refused": True,
+                    "retrieval_metadata": {
+                        "confidence": "context_available",
+                        "steps": retrieval_steps,
+                    },
                 }
             
             unique_sources = {}
@@ -416,6 +447,10 @@ Based on this step-by-step analysis, provide a comprehensive answer:"""
                 "cot_enabled": True,
                 "retrieved_chunks": all_sources_raw,
                 "refused": False,
+                "retrieval_metadata": {
+                    "confidence": "context_available",
+                    "steps": retrieval_steps,
+                },
             }
             
         except Exception as e:
